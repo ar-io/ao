@@ -11,3 +11,6 @@ ao-cache
 .terraform
 .terragrunt-cache
 terraform/*.plan
+
+# wallets
+wallets

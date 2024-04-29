@@ -1,0 +1,73 @@
+name: ao
+
+services:
+  arlocal:
+    image: textury/arlocal:latest
+    ports:
+      - 4000:80
+    volumes:
+      - arlocal:/app/db
+
+  mu:
+    image: ghcr.io/ar-io/ao-mu:latest
+    ports:
+      - 4002:80
+    volumes:
+      - ./wallets/ao-wallet.json:/usr/app/ao-wallet.json
+    environment:
+      - NODE_CONFIG_ENV=${NODE_CONFIG_ENV:-development}
+      - DEBUG=${DEBUG:-*}
+      - PORT=${PORT:-80}
+      - CU_URL=${CU_URL:-http://cu}
+      - GRAPHQL_URL=${GRAPHQL_URL:-http://arlocal/graphql}
+      - PATH_TO_WALLET=${PATH_TO_WALLET:-/usr/app/ao-wallet.json}
+
+  cu: 
+    image: ghcr.io/ar-io/ao-cu:latest
+    ports:
+      - 4004:80
+    volumes:
+      - ./wallets/ao-wallet.json:/usr/app/ao-wallet.json
+    environment:
+      - ARLOCAL_URL=${ARLOCAL_URL:-http://arlocal}
+      - NODE_CONFIG_ENV=${NODE_CONFIG_ENV:-development}
+      - DEBUG=${DEBUG:-*}
+      - PORT=${PORT:-80}
+      - ARWEAVE_URL=${ARWEAVE_URL:-http://arlocal}
+      - GRAPHQL_URL=${GRAPHQL_URL:-http://arlocal}
+      - UPLOADER_URL=${UPLOADER_URL:-https://turbo.ardrive.dev}
+      - WALLET_FILE=${WALLET_FILE:-/usr/app/ao-wallet.json}
+
+  su:
+    image: ghcr.io/ar-io/ao-su:latest
+    ports:
+      - 4003:80
+    volumes:
+      - ./wallets/ao-wallet.json:/usr/app/ao-wallet.json
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://su_user:su_pass@su-database/su_db}
+      - GATEWAY_URL=${GATEWAY_URL:-http://arlocal}
+      - UPLOAD_NODE_URL=${UPLOAD_NODE_URL:-https://turbo.ardrive.dev}
+      - MODE=${MODE:-su}
+      - SCHEDULER_LIST_PATH=${SCHEDULER_LIST_PATH:-}
+      - SU_WALLET_PATH=${SU_WALLET_PATH:-/usr/app/ao-wallet.json}
+    depends_on:
+      - arlocal
+      - su-database
+
+  su-database:
+    image: postgres
+    environment:
+      - POSTGRES_USER=su_user
+      - POSTGRES_PASSWORD=su_pass
+      - POSTGRES_DB=su_db
+    healthcheck:
+      test: pg_isready -U su_user -d su_db || exit 1
+      start_period: 10s
+      start_interval: 1s
+    volumes:
+      - su:/var/lib/postgresql/data
+
+volumes:
+  su:
+  arlocal:
