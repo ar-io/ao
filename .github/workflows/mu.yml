@@ -71,8 +71,8 @@ jobs:
           push: true
           context: servers/mu
           tags: |
-            ghcr.io/permaweb/ao-mu:latest
-            ghcr.io/permaweb/ao-mu:${{ github.sha }}
+            ghcr.io/ar-io/ao-mu:latest
+            ghcr.io/ar-io/ao-mu:${{ github.sha }}
 
   # deploy:
   #   runs-on: ubuntu-latest
