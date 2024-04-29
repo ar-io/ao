@@ -78,41 +78,41 @@ jobs:
             ghcr.io/ar-io/ao-cu:latest
             ghcr.io/ar-io/ao-cu:${{ github.sha }}
 
-  deploy:
-    runs-on: ubuntu-latest
-    # Only deploy on main branch
-    if: github.ref == 'refs/heads/main'
-    # Uncomment if we ever start running the release job
-    # needs: [test, release]
-    needs: [test]
-    steps:
-      - name: ⬇️ Checkout repo
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.bump.outputs.TAG }}
+  # deploy:
+  #   runs-on: ubuntu-latest
+  #   # Only deploy on main branch
+  #   if: github.ref == 'refs/heads/main'
+  #   # Uncomment if we ever start running the release job
+  #   # needs: [test, release]
+  #   needs: [test]
+  #   steps:
+  #     - name: ⬇️ Checkout repo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ needs.bump.outputs.TAG }}
 
-      - name: ⎔ Setup node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+  #     - name: ⎔ Setup node
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 20
 
-      - name: 📥 Download deps
-        working-directory: servers/cu
-        run: |
-          npm i
+  #     - name: 📥 Download deps
+  #       working-directory: servers/cu
+  #       run: |
+  #         npm i
 
-      - name: 👀 Env
-        run: |
-          echo "Event name: ${{ github.event_name }}"
-          echo "Git ref:    ${{ github.ref }}"
-          echo "GH actor:   ${{ github.actor }}"
-          echo "SHA:        ${{ github.sha }}"
-          VER=`node --version`; echo "Node ver:   $VER"
-          VER=`npm --version`; echo "npm ver:    $VER"
+  #     - name: 👀 Env
+  #       run: |
+  #         echo "Event name: ${{ github.event_name }}"
+  #         echo "Git ref:    ${{ github.ref }}"
+  #         echo "GH actor:   ${{ github.actor }}"
+  #         echo "SHA:        ${{ github.sha }}"
+  #         VER=`node --version`; echo "Node ver:   $VER"
+  #         VER=`npm --version`; echo "npm ver:    $VER"
 
-      - name: 🚀 Deploy
-        working-directory: servers/cu
-        env:
-          DEPLOY_HOOKS: ${{ secrets.CU_RENDER_DEPLOY_HOOKS }}
-        run: |
-          node deploy.js
+  #     - name: 🚀 Deploy
+  #       working-directory: servers/cu
+  #       env:
+  #         DEPLOY_HOOKS: ${{ secrets.CU_RENDER_DEPLOY_HOOKS }}
+  #       run: |
+  #         node deploy.js

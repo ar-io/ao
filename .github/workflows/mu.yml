@@ -72,3 +72,42 @@ jobs:
           tags: |
             ghcr.io/permaweb/ao-mu:latest
             ghcr.io/permaweb/ao-mu:${{ github.sha }}
+
+  # deploy:
+  #   runs-on: ubuntu-latest
+  #   # Only deploy on main branch
+  #   if: github.ref == 'refs/heads/main'
+  #   # Uncomment if we ever start running the release job
+  #   # needs: [test, release]
+  #   needs: [test]
+  #   steps:
+  #     - name: ⬇️ Checkout repo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ needs.bump.outputs.TAG }}
+
+  #     - name: ⎔ Setup node
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 20
+
+  #     - name: 📥 Download deps
+  #       working-directory: servers/mu
+  #       run: |
+  #         npm i
+
+  #     - name: 👀 Env
+  #       run: |
+  #         echo "Event name: ${{ github.event_name }}"
+  #         echo "Git ref:    ${{ github.ref }}"
+  #         echo "GH actor:   ${{ github.actor }}"
+  #         echo "SHA:        ${{ github.sha }}"
+  #         VER=`node --version`; echo "Node ver:   $VER"
+  #         VER=`npm --version`; echo "npm ver:    $VER"
+
+  #     - name: 🚀 Deploy
+  #       working-directory: servers/mu
+  #       env:
+  #         DEPLOY_HOOKS: ${{ secrets.MU_RENDER_DEPLOY_HOOKS }}
+  #       run: |
+  #         node deploy.js
