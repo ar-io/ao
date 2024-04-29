@@ -30,6 +30,7 @@ jobs:
           toolchain: stable
 
       - name: Run Tests
+        working-directory: servers/su
         run: cargo test
 
   
