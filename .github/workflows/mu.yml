@@ -1,6 +1,7 @@
 name: 🐄 Test & Deploy AO Messenger Unit
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - main
