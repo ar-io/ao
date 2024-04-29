@@ -1,132 +1,132 @@
-name: 🧰 Test & Deploy AO Connect
+# name: 🧰 Test & Deploy AO Connect
 
-on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "connect/**"
-  push:
-    branches:
-      - main
-    paths:
-      - "connect/**"
+# on:
+#   pull_request:
+#     branches:
+#       - main
+#     paths:
+#       - "connect/**"
+#   push:
+#     branches:
+#       - main
+#     paths:
+#       - "connect/**"
   
-  # Perform a release using a workflow dispatch
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "semver version to bump to"
-        required: true
+#   # Perform a release using a workflow dispatch
+#   workflow_dispatch:
+#     inputs:
+#       version:
+#         description: "semver version to bump to"
+#         required: true
 
-defaults:
-  run:
-    shell: bash
+# defaults:
+#   run:
+#     shell: bash
 
-jobs:
+# jobs:
 
-  test:
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - name: ⬇️ Checkout repo
-        uses: actions/checkout@v4
+#   test:
+#     if: github.event_name != 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: ⬇️ Checkout repo
+#         uses: actions/checkout@v4
 
-      - name: ⎔ Setup node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+#       - name: ⎔ Setup node
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 20
 
-      - name: 📥 Download deps
-        working-directory: connect
-        run: |
-          npm i
+#       - name: 📥 Download deps
+#         working-directory: connect
+#         run: |
+#           npm i
 
-      - name: ⚡ Run Tests
-        working-directory: connect
-        run: |
-          npm test
-        env:
-          CI: true
+#       - name: ⚡ Run Tests
+#         working-directory: connect
+#         run: |
+#           npm test
+#         env:
+#           CI: true
   
-  # test-integration:
-  #   if: github.event_name != 'workflow_dispatch'
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: ⬇️ Checkout repo
-  #       uses: actions/checkout@v4
+#   # test-integration:
+#   #   if: github.event_name != 'workflow_dispatch'
+#   #   runs-on: ubuntu-latest
+#   #   steps:
+#   #     - name: ⬇️ Checkout repo
+#   #       uses: actions/checkout@v4
 
-  #     - name: ⎔ Setup node
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: 18
+#   #     - name: ⎔ Setup node
+#   #       uses: actions/setup-node@v4
+#   #       with:
+#   #         node-version: 18
 
-  #     - name: 📥 Download deps
-  #       uses: bahmutov/npm-install@v1
-  #       with:
-  #         working-directory: connect
+#   #     - name: 📥 Download deps
+#   #       uses: bahmutov/npm-install@v1
+#   #       with:
+#   #         working-directory: connect
 
-  #     - name: ⚡ Run Tests
-  #       working-directory: connect
-  #       run: |
-  #         npm run test:integration
-  #       env:
-  #         CI: true
+#   #     - name: ⚡ Run Tests
+#   #       working-directory: connect
+#   #       run: |
+#   #         npm run test:integration
+#   #       env:
+#   #         CI: true
 
-  release:
-    # Releases are performed via a workflow dispatch
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    concurrency:
-      group: release
-    steps:
-      - name: ⬇️ Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
+#   release:
+#     # Releases are performed via a workflow dispatch
+#     if: github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     concurrency:
+#       group: release
+#     steps:
+#       - name: ⬇️ Checkout repo
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+#           ref: main
 
-      - name: ⎔ Setup node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: "https://registry.npmjs.org"
+#       - name: ⎔ Setup node
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 20
+#           registry-url: "https://registry.npmjs.org"
 
-      - name: 👀 Env
-        run: |
-          echo "Event name: ${{ github.event_name }}"
-          echo "Git ref:    ${{ github.ref }}"
-          echo "GH actor:   ${{ github.actor }}"
-          echo "SHA:        ${{ github.sha }}"
-          VER=`node --version`; echo "Node ver:   $VER"
-          VER=`npm --version`; echo "npm ver:    $VER"
+#       - name: 👀 Env
+#         run: |
+#           echo "Event name: ${{ github.event_name }}"
+#           echo "Git ref:    ${{ github.ref }}"
+#           echo "GH actor:   ${{ github.actor }}"
+#           echo "SHA:        ${{ github.sha }}"
+#           VER=`node --version`; echo "Node ver:   $VER"
+#           VER=`npm --version`; echo "npm ver:    $VER"
 
-      - name: 🤓 Set Git User
-        run: |
-          git config --global user.name "${{ github.actor }}"
-          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+#       - name: 🤓 Set Git User
+#         run: |
+#           git config --global user.name "${{ github.actor }}"
+#           git config --global user.email "${{ github.actor }}@users.noreply.github.com"
 
-      - name: ✊ Bump
-        id: bump
-        uses: hyper63/hyper-ci-bump@v2.0.3
-        with:
-          bump-to: ${{ github.event.inputs.version }}
-          package: connect
+#       - name: ✊ Bump
+#         id: bump
+#         uses: hyper63/hyper-ci-bump@v2.0.3
+#         with:
+#           bump-to: ${{ github.event.inputs.version }}
+#           package: connect
 
-      - name: ⬆️ Push
-        run: |
-          git push
-          git push --tags
+#       - name: ⬆️ Push
+#         run: |
+#           git push
+#           git push --tags
 
-      - name: 📥 Download deps
-        working-directory: connect
-        run: |
-          npm i
+#       - name: 📥 Download deps
+#         working-directory: connect
+#         run: |
+#           npm i
       
-      - name: 🦠 Publish to NPM
-        working-directory: connect
-        run: |
-          npm run build
-          npm publish --access=public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+#       - name: 🦠 Publish to NPM
+#         working-directory: connect
+#         run: |
+#           npm run build
+#           npm publish --access=public
+#         env:
+#           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
