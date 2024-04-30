@@ -57,21 +57,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push binary image to GitHub Container Registry
-        uses: docker/build-push-action@v4
-        with:
-          push: true
-          context: servers/su
-          tags: |
-            ghcr.io/ar-io/ao-su-binary:latest
-            ghcr.io/ar-io/ao-su-binary:${{ github.sha }}
-
       - name: Build and push image to GitHub Container Registry
         uses: docker/build-push-action@v4
         with:
           push: true
           context: servers/su
-          file: servers/su/RunDockerfile
           tags: |
             ghcr.io/ar-io/ao-su:latest
             ghcr.io/ar-io/ao-su:${{ github.sha }}
