@@ -10,6 +10,8 @@ services:
 
   mu:
     image: ghcr.io/ar-io/ao-mu:latest
+    build:
+      context: servers/mu
     ports:
       - 4002:80
     volumes:
@@ -24,6 +26,8 @@ services:
 
   cu: 
     image: ghcr.io/ar-io/ao-cu:latest
+    build:
+      context: servers/cu
     ports:
       - 4004:80
     volumes:
@@ -40,6 +44,8 @@ services:
 
   su:
     image: ghcr.io/ar-io/ao-su:latest
+    build:
+      context: servers/su
     ports:
       - 4003:9000
     volumes:

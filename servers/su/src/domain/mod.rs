@@ -42,7 +42,7 @@ pub async fn init_deps(mode: Option<String>) -> Arc<Deps> {
     );
 
     let signer =
-        Arc::new(ArweaveSigner::new(&config.su_wallet_path).expect("Invalid su wallet path"));
+        Arc::new(ArweaveSigner::new(&config.su_wallet()).expect("Invalid su wallet provided"));
 
     let wallet = Arc::new(FileWallet);
 

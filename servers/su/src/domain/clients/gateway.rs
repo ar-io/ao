@@ -74,8 +74,9 @@ impl ArweaveGateway {
                 Err(_) if attempt < 4 => {
                     // Log the failed attempt and wait before retrying
                     println!(
-                        "Attempt {}: Failed to fetch network info, retrying...",
-                        attempt + 1
+                        "Attempt {}: Failed to fetch network info from {}, retrying...",
+                        attempt + 1,
+                        gateway_url
                     );
                     sleep(Duration::from_secs(1)).await;
                 }
