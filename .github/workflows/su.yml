@@ -71,7 +71,7 @@ jobs:
         with:
           push: true
           context: servers/su
-          file: RunDockerfile
+          file: servers/su/RunDockerfile
           tags: |
             ghcr.io/ar-io/ao-su:latest
             ghcr.io/ar-io/ao-su:${{ github.sha }}
