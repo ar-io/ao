@@ -41,7 +41,7 @@ services:
   su:
     image: ghcr.io/ar-io/ao-su:latest
     ports:
-      - 4003:80
+      - 4003:9000
     volumes:
       - ./wallets/ao-wallet.json:/usr/app/ao-wallet.json
     environment:
