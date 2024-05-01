@@ -10,6 +10,8 @@ services:
 
   mu:
     image: ghcr.io/ar-io/ao-mu:latest
+    build:
+      context: servers/mu
     ports:
       - 4002:80
     volumes:
@@ -24,6 +26,8 @@ services:
 
   cu: 
     image: ghcr.io/ar-io/ao-cu:latest
+    build:
+      context: servers/cu
     ports:
       - 4004:80
     volumes:
@@ -40,15 +44,18 @@ services:
 
   su:
     image: ghcr.io/ar-io/ao-su:latest
+    build:
+      context: servers/su
     ports:
       - 4003:9000
     volumes:
       - ./wallets/ao-wallet.json:/usr/app/ao-wallet.json
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql://su_user:su_pass@su-database/su_db}
-      - GATEWAY_URL=${GATEWAY_URL:-http://arlocal}
+      - GATEWAY_URL=${GATEWAY_URL:-http://arlocal/}
       - UPLOAD_NODE_URL=${UPLOAD_NODE_URL:-https://turbo.ardrive.dev}
       - MODE=${MODE:-su}
+      - DEBUG=${DEBUG:-*}
       - SCHEDULER_LIST_PATH=${SCHEDULER_LIST_PATH:-}
       - SU_WALLET_PATH=${SU_WALLET_PATH:-/usr/app/ao-wallet.json}
     depends_on:
@@ -57,17 +64,19 @@ services:
 
   su-database:
     image: postgres
+    ports:
+      - 5432:5432
     environment:
       - POSTGRES_USER=su_user
       - POSTGRES_PASSWORD=su_pass
-      - POSTGRES_DB=su_db
+      - POSTGRES_DB=su
     healthcheck:
-      test: pg_isready -U su_user -d su_db || exit 1
+      test: pg_isready -U su_user -d su || exit 1
       start_period: 10s
       start_interval: 1s
     volumes:
       - su:/var/lib/postgresql/data
 
 volumes:
-  su:
   arlocal:
+  su:
