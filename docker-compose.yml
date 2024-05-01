@@ -53,7 +53,7 @@ services:
       - ./wallets/ao-wallet.json:/usr/app/ao-wallet.json
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql://su_user:su_pass@su-database/su}
-      - GATEWAY_URL=${GATEWAY_URL:-https://arweave.net/}
+      - GATEWAY_URL=${GATEWAY_URL:-http://arlocal/}
       - UPLOAD_NODE_URL=${UPLOAD_NODE_URL:-https://turbo.ardrive.dev}
       - MODE=${MODE:-su}
       - DEBUG=${DEBUG:-*}

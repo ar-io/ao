@@ -16,20 +16,29 @@ RUN mkdir src && \
 # Now copy the actual source code and build the application
 COPY src ./src
 COPY migrations ./migrations
+COPY ./entrypoint.sh ./entrypoint.sh
+
+RUN chmod +x /usr/src/su/entrypoint.sh
+
 RUN cargo build --release --target x86_64-unknown-linux-musl
 
 # Stage 2: Create the runnable image using the statically-linked binary
-FROM scratch as runner
+FROM debian:latest
+
+# Update package index and install aws-cli
+RUN apt-get update && \
+    apt-get install -y awscli && \
+    apt-get clean
 
 # Set the working directory in the container
 WORKDIR /app
 
 # Copy the statically-linked binary from your local file system to the container
 COPY --from=builder /usr/src/su/target/x86_64-unknown-linux-musl/release/su /app/su
+COPY --from=builder /usr/src/su/entrypoint.sh /app/entrypoint.sh
 
 # Provide instructions for building the binary
 # (This will be displayed when someone runs `docker build`)
 LABEL build_instructions="To build just the binary, run the following command: docker build --target builder -t su ."
 
-# Run the binary - provide args on execution
-ENTRYPOINT [ "/app/su" ]
+ENTRYPOINT [ "./app/entrypoint.sh" ]
