@@ -46,13 +46,14 @@ services:
     image: ghcr.io/ar-io/ao-su:latest
     build:
       context: servers/su
+    command: ["su", "9000"]
     ports:
       - 4003:9000
     volumes:
       - ./wallets/ao-wallet.json:/usr/app/ao-wallet.json
     environment:
-      - DATABASE_URL=${DATABASE_URL:-postgresql://su_user:su_pass@su-database/su_db}
-      - GATEWAY_URL=${GATEWAY_URL:-http://arlocal/}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://su_user:su_pass@su-database/su}
+      - GATEWAY_URL=${GATEWAY_URL:-https://arweave.net/}
       - UPLOAD_NODE_URL=${UPLOAD_NODE_URL:-https://turbo.ardrive.dev}
       - MODE=${MODE:-su}
       - DEBUG=${DEBUG:-*}
