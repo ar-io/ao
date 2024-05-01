@@ -41,4 +41,4 @@ COPY --from=builder /usr/src/su/entrypoint.sh /app/entrypoint.sh
 # (This will be displayed when someone runs `docker build`)
 LABEL build_instructions="To build just the binary, run the following command: docker build --target builder -t su ."
 
-ENTRYPOINT [ "./app/entrypoint.sh" ]
+ENTRYPOINT [ "/app/entrypoint.sh" ]

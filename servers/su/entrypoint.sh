@@ -6,4 +6,4 @@ aws secretsmanager get-secret-value --secret-id ao-wallet --query SecretString -
 # make a .env file
 echo "SU_WALLET_PATH=wallet.json" >> .env
 
-exec ./su $1
+exec ./su "$@"
