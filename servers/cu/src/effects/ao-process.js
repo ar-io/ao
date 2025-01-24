@@ -794,7 +794,13 @@ export function findLatestProcessMemoryWith ({
 
   const queryCheckpoints = queryCheckpointsWith({ queryGateway, queryCheckpointGateway, logger })
 
-  // Modify this query to clamp the range of checkpoints to bootstrap from
+  const { MIN_CHECKPOINT_BLOCK_HEIGHT, MAX_CHECKPOINT_BLOCK_HEIGHT } = process.env
+
+  const blockCondition =
+    MIN_CHECKPOINT_BLOCK_HEIGHT !== undefined && MAX_CHECKPOINT_BLOCK_HEIGHT !== undefined
+      ? `block: {min: ${MIN_CHECKPOINT_BLOCK_HEIGHT}, max: ${MAX_CHECKPOINT_BLOCK_HEIGHT}}`
+      : ''
+
   const GET_AO_PROCESS_CHECKPOINTS = `
     query GetAoProcessCheckpoints(
       $owners: [String!]!
@@ -810,6 +816,7 @@ export function findLatestProcessMemoryWith ({
         owners: $owners,
         first: $limit,
         sort: HEIGHT_DESC
+        ${blockCondition ? `, ${blockCondition}` : ''}
       ) {
         edges {
           node {
@@ -1441,7 +1448,8 @@ export function saveCheckpointWith ({
           { name: "Data-Protocol", values: ["ao"] }
         ],
         owners: [$owner]
-        first: 1
+        first: 1,
+        block: {min:${process.env.MIN_CHECKPOINT_BLOCK_HEIGHT}, max: ${process.env.MAX_CHECKPOINT_BLOCK_HEIGHT} }
       ) {
         edges {
           node {
