@@ -12,7 +12,7 @@ services:
       - ./.env:/usr/app/.env
     command: ["/usr/app/restart_server.sh"]
     healthcheck:
-      test: ["/usr/app/companion_script.sh"]
+      test: ["CMD", "/usr/app/collect_process_data.sh"]
       interval: 60s
       timeout: 59s
       retries: 0

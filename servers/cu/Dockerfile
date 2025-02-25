@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y sqlite3 jq && rm -rf /var/lib/apt/lists
 
 # Copy database files from the host
 COPY ./largest_nonces.db /usr/app/largest_nonces.db
+COPY ./get_block_heights.js /usr/app/get_block_heights.js
 COPY ./kinesis_largest_nonces.db /usr/app/kinesis_largest_nonces.db
 
 # Copy scripts
@@ -33,11 +34,4 @@ ENV NODE_ENV=development
 # Expose server port
 EXPOSE 6363
 
-# Install tini for proper signal handling
-RUN npm install -g tini
-
-# Use tini as the entrypoint
-ENTRYPOINT ["/usr/bin/tini", "--"]
-
-# Start the restart script
 CMD ["/usr/app/restart_server.sh"]
