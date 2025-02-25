@@ -5,7 +5,6 @@ set -e
 # Exit if an uninitialized variable is used
 set -u
 
-# Enable debugging
 DEBUG=true
 
 debug_log() {
@@ -107,8 +106,9 @@ if [ "$DRY_RUN" = true ]; then
   exit 0
 fi
 
-debug_log "Restarting the server with updated environment variables..."
-# Step 3: Restart the server with updated environment variables
-MIN_CHECKPOINT_BLOCK_HEIGHT=$min_checkpoint_block_height \
-MAX_CHECKPOINT_BLOCK_HEIGHT=$max_checkpoint_block_height \
-npm start
+debug_log "Starting server with MIN_CHECKPOINT_BLOCK_HEIGHT=$min_checkpoint_block_height and MAX_CHECKPOINT_BLOCK_HEIGHT=$max_checkpoint_block_height..."
+
+# Start server
+exec env MIN_CHECKPOINT_BLOCK_HEIGHT=$min_checkpoint_block_height \
+         MAX_CHECKPOINT_BLOCK_HEIGHT=$max_checkpoint_block_height \
+         npm start

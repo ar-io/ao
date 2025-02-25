@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  server:
+    build: .
+    restart: always
+    ports:
+      - "6363:6363"
+    volumes:
+      - ./db:/usr/app/db
+      - ./file-checkpoints:/usr/app/file-checkpoints
+      - ./.env:/usr/app/.env
+    command: ["/usr/app/restart_server.sh"]
+    healthcheck:
+      test: ["/usr/app/companion_script.sh"]
+      interval: 60s
+      timeout: 59s
+      retries: 0
+      start_period: 60s
