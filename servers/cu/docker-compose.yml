@@ -10,6 +10,8 @@ services:
       - ./db:/usr/app/db
       - ./file-checkpoints:/usr/app/file-checkpoints
       - ./.env:/usr/app/.env
+      - ./largest_nonces.db:/usr/app/largest_nonces.db
+      - ./kinesis_largest_nonces.db:/usr/app/kinesis_largest_nonces.db
     command: ["/usr/app/restart_server.sh"]
     healthcheck:
       test: ["CMD", "/usr/app/collect_process_data.sh"]

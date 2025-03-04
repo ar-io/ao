@@ -13,14 +13,10 @@ COPY ./src ./src
 # Install required system packages
 RUN apt-get update && apt-get install -y sqlite3 jq && rm -rf /var/lib/apt/lists/*
 
-# Copy database files from the host
-COPY ./largest_nonces.db /usr/app/largest_nonces.db
-COPY ./get_block_heights.js /usr/app/get_block_heights.js
-COPY ./kinesis_largest_nonces.db /usr/app/kinesis_largest_nonces.db
-
 # Copy scripts
-COPY restart_server.sh /usr/app/restart_server.sh
-COPY collect_process_data.sh /usr/app/collect_process_data.sh
+COPY ./restart_server.sh /usr/app/restart_server.sh
+COPY ./get_block_heights.js /usr/app/get_block_heights.js
+COPY ./collect_process_data.sh /usr/app/collect_process_data.sh
 
 # Ensure scripts have execute permissions
 RUN chmod +x /usr/app/restart_server.sh /usr/app/collect_process_data.sh
