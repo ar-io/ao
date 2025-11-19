@@ -119,6 +119,8 @@ async function main () {
     console.log(`  Total messages: ${stats.total}`)
     console.log(`  Discovered: ${stats.discovered}`)
     console.log(`  Pending: ${stats.pending}`)
+    console.log(`  Needs retry: ${stats.needsRetry}`)
+    console.log(`  Max nonce: ${stats.maxNonce}`)
     console.log(`  Discovery rate: ${stats.total > 0 ? ((stats.discovered / stats.total) * 100).toFixed(1) : 0}%`)
 
     verifier.close()
@@ -145,13 +147,14 @@ async function main () {
     console.log(`  Verified: ${result.verified}`)
     console.log(`  Found: ${result.found}`)
     console.log(`  Not found: ${result.notFound}`)
-    console.log(`  Errors: ${result.errors}`)
 
     const stats = verifier.getStats()
     console.log('\nOverall Stats:')
     console.log(`  Total: ${stats.total}`)
     console.log(`  Discovered: ${stats.discovered}`)
     console.log(`  Pending: ${stats.pending}`)
+    console.log(`  Needs retry: ${stats.needsRetry}`)
+    console.log(`  Max nonce: ${stats.maxNonce}`)
 
     verifier.close()
     return

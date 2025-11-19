@@ -100,19 +100,19 @@ export class MessageVerifier {
   }
 
   /**
-   * Build GraphQL query for finding a message by Reference tag
+   * Build GraphQL query for finding messages by multiple Reference tags (batched)
    */
-  buildQuery (reference) {
+  buildBatchQuery (references) {
     return {
-      query: `query FindMessage($reference: [String!]!, $processId: [String!]!, $owners: [String!]!) {
+      query: `query FindMessages($references: [String!]!, $processId: [String!]!, $owners: [String!]!) {
         transactions(
           tags: [
-            { name: "Reference", values: $reference }
+            { name: "Reference", values: $references }
             { name: "Data-Protocol", values: ["ao"] }
             { name: "From-Process", values: $processId }
           ],
           owners: $owners,
-          first: 10,
+          first: ${Math.min(references.length * 2, 100)},
           sort: HEIGHT_DESC
         ) {
           edges {
@@ -134,7 +134,7 @@ export class MessageVerifier {
         }
       }`,
       variables: {
-        reference: [reference],
+        references,
         processId: [this.processId],
         owners: this.muOwners
       }
@@ -163,11 +163,15 @@ export class MessageVerifier {
   }
 
   /**
-   * Query Arweave gateway to find a message by Reference
+   * Query Arweave gateway to find messages by multiple References (batched)
+   * Returns a Map of reference -> messageId (or undefined if not found)
    * Implements exponential backoff for retries
    */
-  async findMessageOnArweave (reference, expectedTarget, expectedAction) {
-    const query = this.buildQuery(reference)
+  async findMessagesOnArweave (rows) {
+    // Extract unique references
+    const references = [...new Set(rows.map(r => r.output_message_reference))]
+    const query = this.buildBatchQuery(references)
+
     let lastError = null
     let delay = this.initialRetryDelayMs
 
@@ -190,7 +194,7 @@ export class MessageVerifier {
             lastError = error
             if (attempt < this.maxRetries) {
               this.logger.warn(
-                `GraphQL request failed (attempt ${attempt + 1}/${this.maxRetries + 1}): ${response.status}. Retrying in ${delay}ms...`
+                `GraphQL batch request failed (attempt ${attempt + 1}/${this.maxRetries + 1}): ${response.status}. Retrying in ${delay}ms...`
               )
               await sleep(delay)
               delay = Math.min(delay * 2, this.maxRetryDelayMs)
@@ -209,37 +213,31 @@ export class MessageVerifier {
 
         const edges = result.data?.transactions?.edges || []
 
-        if (edges.length === 0) {
-          return null
-        }
+        // Build a map of reference -> messageId
+        const foundMessages = new Map()
 
-        // Find matching message by checking Target tag if multiple results
         for (const edge of edges) {
           const node = edge.node
           const tags = node.tags || []
 
-          // Check if this message matches our expected target
-          const targetTag = tags.find(t => t.name === 'Target')
-          if (targetTag && targetTag.value === expectedTarget) {
-            // Optionally verify action matches
-            if (expectedAction) {
-              const actionTag = tags.find(t => t.name === 'Action')
-              if (actionTag && actionTag.value !== expectedAction) {
-                continue // Action doesn't match, try next
-              }
-            }
-            return node.id
+          const refTag = tags.find(t => t.name === 'Reference')
+          if (!refTag) continue
+
+          const reference = refTag.value
+
+          // Only set if we haven't found this reference yet (first match wins)
+          if (!foundMessages.has(reference)) {
+            foundMessages.set(reference, node.id)
           }
         }
 
-        // If no exact target match, return first result (may be a broadcast)
-        return edges[0].node.id
+        return foundMessages
       } catch (error) {
         lastError = error
 
         if (this.isRetryableError(error, response) && attempt < this.maxRetries) {
           this.logger.warn(
-            `GraphQL request error (attempt ${attempt + 1}/${this.maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`
+            `GraphQL batch request error (attempt ${attempt + 1}/${this.maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`
           )
           await sleep(delay)
           delay = Math.min(delay * 2, this.maxRetryDelayMs)
@@ -252,48 +250,13 @@ export class MessageVerifier {
     }
 
     // If we get here, we've exhausted retries
-    this.logger.error(`GraphQL request failed after ${this.maxRetries + 1} attempts for reference ${reference}: ${lastError.message}`)
+    this.logger.error(`GraphQL batch request failed after ${this.maxRetries + 1} attempts: ${lastError.message}`)
     this.logger.error('Max retries exceeded. Terminating process.')
     process.exit(1)
   }
 
   /**
-   * Verify a single row
-   */
-  async verifyRow (row) {
-    try {
-      const messageId = await this.findMessageOnArweave(
-        row.output_message_reference,
-        row.output_message_target,
-        row.output_message_action
-      )
-
-      if (messageId) {
-        this.verificationDb.updateDiscovered(
-          row.nonce,
-          row.output_message_index,
-          messageId
-        )
-        this.logger.debug(
-          `Found message ${messageId} for reference ${row.output_message_reference} (nonce: ${row.nonce})`
-        )
-        return { found: true, messageId }
-      } else {
-        this.verificationDb.updateAttemptOnly(row.nonce, row.output_message_index)
-        this.logger.debug(
-          `Message not found for reference ${row.output_message_reference} (nonce: ${row.nonce})`
-        )
-        return { found: false }
-      }
-    } catch (error) {
-      // Update attempt timestamp even on error to avoid hammering
-      this.verificationDb.updateAttemptOnly(row.nonce, row.output_message_index)
-      return { found: false, error: error.message }
-    }
-  }
-
-  /**
-   * Run verification cycle
+   * Run verification cycle with batched queries
    * Returns stats about what was processed
    */
   async runVerificationCycle () {
@@ -308,35 +271,42 @@ export class MessageVerifier {
         synced,
         verified: 0,
         found: 0,
-        notFound: 0,
-        errors: 0
+        notFound: 0
       }
     }
+
+    // Query for all references in one batch
+    const foundMessages = await this.findMessagesOnArweave(rows)
 
     let found = 0
     let notFound = 0
-    let errors = 0
 
+    // Process results and update database
     for (const row of rows) {
-      const result = await this.verifyRow(row)
-      if (result.error) {
-        errors++
-      } else if (result.found) {
+      const messageId = foundMessages.get(row.output_message_reference)
+
+      if (messageId) {
+        this.verificationDb.updateDiscovered(
+          row.nonce,
+          row.output_message_index,
+          messageId
+        )
         found++
       } else {
+        this.verificationDb.updateAttemptOnly(row.nonce, row.output_message_index)
         notFound++
       }
-
-      // Small delay to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 100))
     }
+
+    this.logger.info(
+      `Batch verified ${rows.length} messages: ${found} found, ${notFound} not found`
+    )
 
     return {
       synced,
       verified: rows.length,
       found,
-      notFound,
-      errors
+      notFound
     }
   }
 
@@ -374,33 +344,47 @@ export async function runVerifier ({
   console.log(`Starting verifier for process ${processId}`)
   console.log(`Retry after: ${options.retryAfterMinutes || 10} minutes`)
   console.log(`Batch size: ${options.batchSize || 100}`)
-  console.log(`Cycle interval: ${intervalMs}ms`)
+  console.log(`Cycle interval: ${intervalMs}ms (skipped when work pending)`)
+
+  let running = true
 
   const runCycle = async () => {
     try {
       const stats = await verifier.runVerificationCycle()
       const dbStats = verifier.getStats()
 
-      console.log(`Cycle complete: synced=${stats.synced}, verified=${stats.verified}, found=${stats.found}, notFound=${stats.notFound}, errors=${stats.errors}`)
-      console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, pending=${dbStats.pending}`)
+      console.log(`Cycle complete: synced=${stats.synced}, verified=${stats.verified}, found=${stats.found}, notFound=${stats.notFound}`)
+      console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
+
+      // Continue immediately only if there are still pending (never-checked) messages
+      return stats.verified > 0 && dbStats.pending > 0
     } catch (error) {
       console.error('Verification cycle error:', error)
+      return false
     }
   }
-
-  // Run immediately
-  await runCycle()
-
-  // Then run on interval
-  const interval = setInterval(runCycle, intervalMs)
 
   // Handle shutdown
   process.on('SIGINT', () => {
     console.log('Shutting down verifier...')
-    clearInterval(interval)
+    running = false
     verifier.close()
     process.exit(0)
   })
+
+  // Run continuously
+  // eslint-disable-next-line no-unmodified-loop-condition
+  while (running) {
+    const hadWork = await runCycle()
+
+    if (hadWork) {
+      // More work to do, continue immediately
+      continue
+    } else {
+      // No work available, wait for interval
+      await new Promise(resolve => setTimeout(resolve, intervalMs))
+    }
+  }
 
   return verifier
 }
