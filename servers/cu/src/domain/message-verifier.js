@@ -356,8 +356,15 @@ export async function runVerifier ({
       console.log(`Cycle complete: synced=${stats.synced}, verified=${stats.verified}, found=${stats.found}, notFound=${stats.notFound}`)
       console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
 
-      // Continue immediately only if there are still pending (never-checked) messages
-      return stats.verified > 0 && dbStats.pending > 0
+      // Show when next retries will be eligible
+      if (dbStats.needsRetry > 0 && dbStats.earliestRetryAttempt) {
+        const nextEligibleTime = dbStats.earliestRetryAttempt + verifier.retryAfterMs
+        const nextEligibleDate = new Date(nextEligibleTime)
+        console.log(`Next retry eligible: ${nextEligibleDate.toLocaleString()}`)
+      }
+
+      // Continue immediately if we processed any rows (there may be more pending or retry-ready)
+      return stats.verified > 0
     } catch (error) {
       console.error('Verification cycle error:', error)
       return false

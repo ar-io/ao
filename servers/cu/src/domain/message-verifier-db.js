@@ -229,12 +229,16 @@ export function createVerificationDb ({
         `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND last_discovery_attempt IS NOT NULL`
       ).get()
       const maxNonce = db.prepare(`SELECT MAX(nonce) as max_nonce FROM ${VERIFICATION_TABLE}`).get()
+      const earliestRetry = db.prepare(
+        `SELECT MIN(last_discovery_attempt) as earliest FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND last_discovery_attempt IS NOT NULL`
+      ).get()
       return {
         total: total.count,
         discovered: discovered.count,
         pending: pending.count,
         needsRetry: needsRetry.count,
-        maxNonce: maxNonce.max_nonce || 0
+        maxNonce: maxNonce.max_nonce || 0,
+        earliestRetryAttempt: earliestRetry.earliest || null
       }
     },
 
