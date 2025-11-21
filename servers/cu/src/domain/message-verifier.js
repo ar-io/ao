@@ -344,32 +344,9 @@ export async function runVerifier ({
   console.log(`Starting verifier for process ${processId}`)
   console.log(`Retry after: ${options.retryAfterMinutes || 10} minutes`)
   console.log(`Batch size: ${options.batchSize || 100}`)
-  console.log(`Cycle interval: ${intervalMs}ms (skipped when work pending)`)
+  console.log(`Cycle interval: ${intervalMs}ms`)
 
   let running = true
-
-  const runCycle = async () => {
-    try {
-      const stats = await verifier.runVerificationCycle()
-      const dbStats = verifier.getStats()
-
-      console.log(`Cycle complete: synced=${stats.synced}, verified=${stats.verified}, found=${stats.found}, notFound=${stats.notFound}`)
-      console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
-
-      // Show when next retries will be eligible
-      if (dbStats.needsRetry > 0 && dbStats.earliestRetryAttempt) {
-        const nextEligibleTime = dbStats.earliestRetryAttempt + verifier.retryAfterMs
-        const nextEligibleDate = new Date(nextEligibleTime)
-        console.log(`Next retry eligible: ${nextEligibleDate.toLocaleString()}`)
-      }
-
-      // Continue immediately if we processed any rows (there may be more pending or retry-ready)
-      return stats.verified > 0
-    } catch (error) {
-      console.error('Verification cycle error:', error)
-      return false
-    }
-  }
 
   // Handle shutdown
   process.on('SIGINT', () => {
@@ -382,14 +359,72 @@ export async function runVerifier ({
   // Run continuously
   // eslint-disable-next-line no-unmodified-loop-condition
   while (running) {
-    const hadWork = await runCycle()
+    const cycleStartTime = Date.now()
 
-    if (hadWork) {
-      // More work to do, continue immediately
-      continue
-    } else {
-      // No work available, wait for interval
-      await new Promise(resolve => setTimeout(resolve, intervalMs))
+    try {
+      // Sync new messages from discovery DB
+      const synced = await verifier.syncFromDiscoveryDb()
+
+      // Process all available work in batches
+      let totalVerified = 0
+      let totalFound = 0
+      let totalNotFound = 0
+      let batchCount = 0
+
+      // eslint-disable-next-line no-unmodified-loop-condition
+      while (running) {
+        const rows = verifier.getRowsToVerify()
+        if (rows.length === 0) break
+
+        const foundMessages = await verifier.findMessagesOnArweave(rows)
+
+        let found = 0
+        let notFound = 0
+
+        for (const row of rows) {
+          const messageId = foundMessages.get(row.output_message_reference)
+          if (messageId) {
+            verifier.verificationDb.updateDiscovered(row.nonce, row.output_message_index, messageId)
+            found++
+          } else {
+            verifier.verificationDb.updateAttemptOnly(row.nonce, row.output_message_index)
+            notFound++
+          }
+        }
+
+        totalVerified += rows.length
+        totalFound += found
+        totalNotFound += notFound
+        batchCount++
+
+        console.log(`Batch ${batchCount}: verified=${rows.length}, found=${found}, notFound=${notFound}`)
+      }
+
+      const dbStats = verifier.getStats()
+      console.log(`Cycle complete: synced=${synced}, totalVerified=${totalVerified}, found=${totalFound}, notFound=${totalNotFound}`)
+      console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
+
+      // Show when next retries will be eligible
+      if (dbStats.needsRetry > 0 && dbStats.earliestRetryAttempt) {
+        const nextEligibleTime = dbStats.earliestRetryAttempt + verifier.retryAfterMs
+        const nextEligibleDate = new Date(nextEligibleTime)
+        console.log(`Next retry eligible: ${nextEligibleDate.toLocaleString()}`)
+      }
+
+      // Calculate remaining time in interval
+      const elapsedMs = Date.now() - cycleStartTime
+      const remainingMs = intervalMs - elapsedMs
+
+      if (remainingMs > 0) {
+        console.log(`Waiting ${Math.round(remainingMs / 1000)}s until next cycle...`)
+        await sleep(remainingMs)
+      } else {
+        console.log(`Cycle took ${Math.round(elapsedMs / 1000)}s (longer than interval), continuing immediately...`)
+      }
+    } catch (error) {
+      console.error('Verification cycle error:', error)
+      // Wait before retrying on error
+      await sleep(intervalMs)
     }
   }
 
