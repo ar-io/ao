@@ -39,6 +39,7 @@ Usage:
 Options:
   --discovery-dir <path>     Discovery DB directory (default: ./data/process-messages)
   --verification-dir <path>  Verification DB directory (default: ./data/verification)
+  --use-cache <path>         Use ao-cache.sqlite as source instead of discovery DB
   --graphql-url <url>        GraphQL endpoint
   --retry-after <minutes>    Minutes before retrying (default: 10)
   --batch-size <n>           Messages per cycle (default: 100)
@@ -50,6 +51,7 @@ Examples:
   node scripts/run-verifier.js qNvAoz0TgcH7DMg8BCVn8jF32QH5L6T29VjHxhHqqGE
   node scripts/run-verifier.js qNvAoz0TgcH7DMg8BCVn8jF32QH5L6T29VjHxhHqqGE --once
   node scripts/run-verifier.js qNvAoz0TgcH7DMg8BCVn8jF32QH5L6T29VjHxhHqqGE --stats
+  node scripts/run-verifier.js qNvAoz0TgcH7DMg8BCVn8jF32QH5L6T29VjHxhHqqGE --use-cache ./ao-cache.sqlite
 `)
     process.exit(0)
   }
@@ -59,6 +61,7 @@ Examples:
     processId,
     discoveryDbDir: './data/process-messages',
     verificationDbDir: './data/verification',
+    cacheDbPath: null,
     graphqlUrl: 'https://arweave-search.goldsky.com/graphql',
     retryAfterMinutes: 10,
     batchSize: 100,
@@ -74,6 +77,9 @@ Examples:
         break
       case '--verification-dir':
         options.verificationDbDir = args[++i]
+        break
+      case '--use-cache':
+        options.cacheDbPath = args[++i]
         break
       case '--graphql-url':
         options.graphqlUrl = args[++i]
@@ -110,7 +116,8 @@ async function main () {
     const verifier = new MessageVerifier({
       processId: options.processId,
       discoveryDbDir: options.discoveryDbDir,
-      verificationDbDir: options.verificationDbDir
+      verificationDbDir: options.verificationDbDir,
+      cacheDbPath: options.cacheDbPath
     })
     verifier.init()
 
@@ -133,6 +140,7 @@ async function main () {
       processId: options.processId,
       discoveryDbDir: options.discoveryDbDir,
       verificationDbDir: options.verificationDbDir,
+      cacheDbPath: options.cacheDbPath,
       graphqlUrl: options.graphqlUrl,
       retryAfterMinutes: options.retryAfterMinutes,
       batchSize: options.batchSize
@@ -165,6 +173,7 @@ async function main () {
     processId: options.processId,
     discoveryDbDir: options.discoveryDbDir,
     verificationDbDir: options.verificationDbDir,
+    cacheDbPath: options.cacheDbPath,
     graphqlUrl: options.graphqlUrl,
     retryAfterMinutes: options.retryAfterMinutes,
     batchSize: options.batchSize,

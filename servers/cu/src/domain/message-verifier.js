@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3'
 import { createVerificationDb } from './message-verifier-db.js'
 import { createProcessMessagesDb } from './process-messages-db.js'
 
@@ -15,6 +16,7 @@ export class MessageVerifier {
     processId,
     discoveryDbDir = './data/process-messages',
     verificationDbDir = './data/verification',
+    cacheDbPath = null, // Optional path to ao-cache.sqlite to use as source
     graphqlUrl = 'https://arweave-search.goldsky.com/graphql',
     retryAfterMinutes = 10,
     batchSize = 100,
@@ -33,6 +35,7 @@ export class MessageVerifier {
     this.processId = processId
     this.discoveryDbDir = discoveryDbDir
     this.verificationDbDir = verificationDbDir
+    this.cacheDbPath = cacheDbPath
     this.graphqlUrl = graphqlUrl
     this.retryAfterMs = retryAfterMinutes * 60 * 1000
     this.batchSize = batchSize
@@ -44,6 +47,7 @@ export class MessageVerifier {
 
     this.verificationDb = null
     this.discoveryDb = null
+    this.cacheDb = null
   }
 
   /**
@@ -55,19 +59,36 @@ export class MessageVerifier {
       baseDir: this.verificationDbDir
     })
 
-    this.discoveryDb = createProcessMessagesDb({
-      processId: this.processId,
-      baseDir: this.discoveryDbDir
-    })
-
-    this.logger.info(`MessageVerifier initialized for process ${this.processId}`)
+    if (this.cacheDbPath) {
+      // Use ao-cache.sqlite as source
+      this.cacheDb = new Database(this.cacheDbPath, { readonly: true })
+      this.logger.info(`MessageVerifier initialized for process ${this.processId} using cache DB: ${this.cacheDbPath}`)
+    } else {
+      // Use process-messages discovery DB as source
+      this.discoveryDb = createProcessMessagesDb({
+        processId: this.processId,
+        baseDir: this.discoveryDbDir
+      })
+      this.logger.info(`MessageVerifier initialized for process ${this.processId} using discovery DB`)
+    }
   }
 
   /**
-   * Sync new messages from discovery DB to verification DB
-   * Uses nonce as cursor for incremental sync
+   * Sync new messages from source DB to verification DB
+   * Routes to appropriate sync method based on configuration
    */
   async syncFromDiscoveryDb () {
+    if (this.cacheDb) {
+      return this.syncFromCacheDb()
+    }
+    return this.syncFromProcessMessagesDb()
+  }
+
+  /**
+   * Sync from process-messages discovery DB
+   * Uses nonce as cursor for incremental sync
+   */
+  syncFromProcessMessagesDb () {
     const lastNonce = this.verificationDb.getLastSyncedNonce(this.processId)
 
     // Query discovery DB for rows with nonce > lastNonce
@@ -90,6 +111,78 @@ export class MessageVerifier {
 
     this.logger.info(`Synced ${newRows.length} messages from discovery DB (nonce ${lastNonce} -> ${maxNonce})`)
     return newRows.length
+  }
+
+  /**
+   * Sync from ao-cache.sqlite evaluations table
+   * Extracts output messages from JSONB output field
+   */
+  syncFromCacheDb () {
+    const lastNonce = this.verificationDb.getLastSyncedNonce(this.processId)
+
+    // Query evaluations table for rows with Messages in output, for this process
+    const stmt = this.cacheDb.prepare(`
+      SELECT
+        messageId,
+        nonce,
+        timestamp,
+        json_extract(output, '$.Messages') as messages
+      FROM evaluations
+      WHERE processId = ?
+        AND nonce > ?
+        AND json_array_length(json_extract(output, '$.Messages')) > 0
+      ORDER BY nonce ASC
+    `)
+
+    const rows = stmt.all(this.processId, lastNonce)
+
+    if (rows.length === 0) {
+      this.logger.debug('No new messages to sync from cache DB')
+      return 0
+    }
+
+    // Transform cache rows into verification rows
+    const verificationRows = []
+    for (const row of rows) {
+      const messages = JSON.parse(row.messages)
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i]
+        // Extract Reference and Action from Tags array
+        const tags = msg.Tags || []
+        const referenceTag = tags.find(t => t.name === 'Reference')
+        const actionTag = tags.find(t => t.name === 'Action')
+
+        if (!referenceTag) {
+          // Skip messages without Reference tag
+          continue
+        }
+
+        verificationRows.push({
+          nonce: row.nonce,
+          input_message_id: row.messageId,
+          output_message_reference: referenceTag.value,
+          output_message_target: msg.Target,
+          output_message_action: actionTag ? actionTag.value : null,
+          output_message_index: i,
+          created_at: row.timestamp
+        })
+      }
+    }
+
+    if (verificationRows.length === 0) {
+      this.logger.debug('No messages with Reference tags found in cache DB')
+      return 0
+    }
+
+    // Insert into verification DB
+    this.verificationDb.insertMessages(verificationRows)
+
+    // Update cursor to highest nonce
+    const maxNonce = Math.max(...rows.map(r => r.nonce))
+    this.verificationDb.updateCursor(this.processId, maxNonce)
+
+    this.logger.info(`Synced ${verificationRows.length} messages from cache DB (nonce ${lastNonce} -> ${maxNonce})`)
+    return verificationRows.length
   }
 
   /**
@@ -326,6 +419,9 @@ export class MessageVerifier {
     }
     if (this.discoveryDb) {
       this.discoveryDb.close()
+    }
+    if (this.cacheDb) {
+      this.cacheDb.close()
     }
   }
 }
