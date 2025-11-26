@@ -18,6 +18,7 @@ const createVerificationTable = (db) => db.prepare(
   `CREATE TABLE IF NOT EXISTS ${VERIFICATION_TABLE}(
     nonce INTEGER NOT NULL,
     input_message_id TEXT NOT NULL,
+    input_message_timestamp INTEGER,
     output_message_reference TEXT NOT NULL,
     output_message_target TEXT NOT NULL,
     output_message_action TEXT,
@@ -44,6 +45,7 @@ const createCursorTable = (db) => db.prepare(
  * Create indexes for efficient querying
  */
 const createIndexes = (db) => {
+  // Index for fast MIN/MAX nonce lookups
   db.prepare(
     `CREATE INDEX IF NOT EXISTS idx_${VERIFICATION_TABLE}_nonce
       ON ${VERIFICATION_TABLE} (nonce);`
@@ -62,6 +64,19 @@ const createIndexes = (db) => {
   db.prepare(
     `CREATE INDEX IF NOT EXISTS idx_${VERIFICATION_TABLE}_reference
       ON ${VERIFICATION_TABLE} (output_message_reference);`
+  ).run()
+
+  // Composite index for getRowsToVerify query
+  db.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_${VERIFICATION_TABLE}_pending
+      ON ${VERIFICATION_TABLE} (discovered_message_id, last_discovery_attempt, nonce, output_message_index);`
+  ).run()
+
+  // Partial index for timestamp range queries on undiscovered messages
+  db.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_${VERIFICATION_TABLE}_pending_timestamp
+      ON ${VERIFICATION_TABLE} (input_message_timestamp)
+      WHERE discovered_message_id IS NULL;`
   ).run()
 }
 
@@ -117,9 +132,9 @@ export function createVerificationDb ({
    */
   const insertStmt = db.prepare(
     `INSERT OR IGNORE INTO ${VERIFICATION_TABLE}
-    (nonce, input_message_id, output_message_reference, output_message_target,
+    (nonce, input_message_id, input_message_timestamp, output_message_reference, output_message_target,
      output_message_action, output_message_index, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   )
 
   const getCursorStmt = db.prepare(
@@ -172,6 +187,7 @@ export function createVerificationDb ({
           insertStmt.run(
             msg.nonce,
             msg.input_message_id,
+            msg.input_message_timestamp || null,
             msg.output_message_reference,
             msg.output_message_target,
             msg.output_message_action || null,
