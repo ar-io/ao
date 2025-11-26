@@ -7,6 +7,7 @@ import { worker, Transfer } from 'workerpool'
 import { createLogger } from '../../../domain/logger.js'
 import { arrayBufferFromMaybeView } from '../../../domain/utils.js'
 import { eventVacuum } from '../../../domain/event-vacuum.js'
+import { messageTracker } from '../../../domain/message-tracker.js'
 
 import { createApis } from './main.js'
 
@@ -85,6 +86,21 @@ worker({
             +ordinate,
             output.GasUsed,
             arrayBufferFromMaybeView(output.Memory).byteLength
+          )
+        }
+      }
+
+      if (messageTracker) {
+        const { processId, ordinate, message } = args[0]
+
+        // Don't track messages on dry runs
+        if (message && !message['Read-Only']) {
+          console.log('Tracking messages for processId:', processId)
+          await messageTracker.trackMessages(
+            output,
+            processId,
+            +ordinate,
+            message.Id || message.id
           )
         }
       }

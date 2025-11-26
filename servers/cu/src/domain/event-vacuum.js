@@ -51,7 +51,7 @@ export class EventVacuum {
   }
 }
 
-const transportNames = (process.env.EVENT_VACUUM_TRANSPORTS ?? '').split(';')
+const transportNames = (process.env.EVENT_VACUUM_TRANSPORTS ?? '').split(';').filter(name => name.trim() !== '')
 const transports = transportNames.map((transportName) => {
   switch (transportName) {
     case 'console':
@@ -70,6 +70,7 @@ const transports = transportNames.map((transportName) => {
         streamName: process.env.KINESIS_STREAM_NAME
       })
     default:
+      console.error(`Unknown event transport "${transportName}"`)
       throw new Error(`Unknown event transport "${transportName}"`)
   }
 })
