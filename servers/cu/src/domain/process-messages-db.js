@@ -19,6 +19,7 @@ const createProcessMessagesTable = (db) => db.prepare(
   `CREATE TABLE IF NOT EXISTS ${PROCESS_MESSAGES_TABLE}(
     nonce INTEGER NOT NULL,
     input_message_id TEXT NOT NULL,
+    input_message_timestamp INTEGER,
     output_message_reference TEXT NOT NULL,
     output_message_target TEXT NOT NULL,
     output_message_action TEXT,
@@ -111,9 +112,9 @@ export function createProcessMessagesDb ({
    */
   const insertStmt = db.prepare(
     `INSERT OR REPLACE INTO ${PROCESS_MESSAGES_TABLE}
-    (nonce, input_message_id, output_message_reference, output_message_target,
+    (nonce, input_message_id, input_message_timestamp, output_message_reference, output_message_target,
      output_message_action, output_message_index, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   )
 
   const client = {
@@ -123,6 +124,7 @@ export function createProcessMessagesDb ({
     insertMessage: ({
       nonce,
       inputMessageId,
+      inputMessageTimestamp,
       outputMessageReference,
       outputMessageTarget,
       outputMessageAction,
@@ -131,6 +133,7 @@ export function createProcessMessagesDb ({
       return insertStmt.run(
         nonce,
         inputMessageId,
+        inputMessageTimestamp || null,
         outputMessageReference,
         outputMessageTarget,
         outputMessageAction || null,
@@ -149,6 +152,7 @@ export function createProcessMessagesDb ({
           insertStmt.run(
             msg.nonce,
             msg.inputMessageId,
+            msg.inputMessageTimestamp || null,
             msg.outputMessageReference,
             msg.outputMessageTarget,
             msg.outputMessageAction || null,

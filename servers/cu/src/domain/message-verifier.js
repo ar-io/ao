@@ -170,6 +170,7 @@ export class MessageVerifier {
         verificationRows.push({
           nonce: row.nonce,
           input_message_id: row.messageId,
+          input_message_timestamp: row.timestamp,
           output_message_reference: referenceTag.value,
           output_message_target: msg.Target,
           output_message_action: actionTag ? actionTag.value : null,
@@ -366,6 +367,7 @@ export class MessageVerifier {
           verificationRows.push({
             nonce: row.nonce,
             input_message_id: row.messageId,
+            input_message_timestamp: row.timestamp,
             output_message_reference: referenceTag.value,
             output_message_target: msg.Target,
             output_message_action: actionTag ? actionTag.value : null,
