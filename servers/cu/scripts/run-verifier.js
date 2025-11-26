@@ -46,6 +46,7 @@ Options:
   --interval <ms>            Ms between cycles (default: 60000)
   --once                     Run one cycle and exit
   --stats                    Show stats and exit
+  --dry-run                  Check for nonce gaps and verify without writing to DB
 
 Examples:
   node scripts/run-verifier.js qNvAoz0TgcH7DMg8BCVn8jF32QH5L6T29VjHxhHqqGE
@@ -67,7 +68,8 @@ Examples:
     batchSize: 100,
     intervalMs: 60000,
     once: false,
-    stats: false
+    stats: false,
+    dryRun: false
   }
 
   for (let i = 1; i < args.length; i++) {
@@ -99,6 +101,9 @@ Examples:
       case '--stats':
         options.stats = true
         break
+      case '--dry-run':
+        options.dryRun = true
+        break
       default:
         console.error(`Unknown option: ${args[i]}`)
         process.exit(1)
@@ -129,6 +134,56 @@ async function main () {
     console.log(`  Needs retry: ${stats.needsRetry}`)
     console.log(`  Max nonce: ${stats.maxNonce}`)
     console.log(`  Discovery rate: ${stats.total > 0 ? ((stats.discovered / stats.total) * 100).toFixed(1) : 0}%`)
+
+    verifier.close()
+    return
+  }
+
+  if (options.dryRun) {
+    // Dry run: check for nonce gaps and verify without writing
+    const verifier = new MessageVerifier({
+      processId: options.processId,
+      discoveryDbDir: options.discoveryDbDir,
+      verificationDbDir: options.verificationDbDir,
+      cacheDbPath: options.cacheDbPath,
+      graphqlUrl: options.graphqlUrl,
+      retryAfterMinutes: options.retryAfterMinutes,
+      batchSize: options.batchSize
+    })
+    verifier.init()
+
+    console.log(`Dry run for process ${options.processId}`)
+    console.log('Checking for nonce gaps between source and verification DBs...\n')
+
+    const gapCheck = verifier.checkNonceGap()
+
+    console.log('Source DB:')
+    console.log(`  Min nonce: ${gapCheck.source.minNonce ?? 'N/A'}`)
+    console.log(`  Max nonce: ${gapCheck.source.maxNonce ?? 'N/A'}`)
+
+    console.log('\nVerification DB:')
+    console.log(`  Min nonce: ${gapCheck.verification.minNonce ?? 'N/A'}`)
+    console.log(`  Max nonce: ${gapCheck.verification.maxNonce ?? 'N/A'}`)
+    console.log(`  Next nonce needed: ${gapCheck.verification.nextNonceNeeded}`)
+
+    if (gapCheck.hasGap) {
+      console.log('\n⚠️  WARNING: Nonce gap detected!')
+      console.log(`  ${gapCheck.gapReason}`)
+      console.log('\nDry run aborted due to gap. Verification would produce incomplete results.')
+      verifier.close()
+      process.exit(1)
+    }
+
+    console.log('\n✓ No nonce gaps detected. Proceeding with dry-run verification...\n')
+
+    const result = await verifier.runDryRunVerification()
+
+    console.log('\nDry Run Results:')
+    console.log(`  Would sync: ${result.wouldSync} messages`)
+    console.log(`  Verified: ${result.verified}`)
+    console.log(`  Found on Arweave: ${result.found}`)
+    console.log(`  Not found: ${result.notFound}`)
+    console.log('\nNo changes were written to the verification DB.')
 
     verifier.close()
     return

@@ -92,10 +92,15 @@ export class MessageVerifier {
     const lastNonce = this.verificationDb.getLastSyncedNonce(this.processId)
 
     // Query discovery DB for rows with nonce > lastNonce
+    this.logger.info(`Querying discovery DB for rows with nonce > ${lastNonce}...`)
+    const queryStart = Date.now()
+
     const newRows = this.discoveryDb.query(
       'SELECT * FROM process_messages WHERE nonce > ? ORDER BY nonce ASC, output_message_index ASC',
       [lastNonce]
     )
+    const queryMs = Date.now() - queryStart
+    this.logger.info(`Discovery DB query returned ${newRows.length} rows in ${queryMs}ms`)
 
     if (newRows.length === 0) {
       this.logger.debug('No new messages to sync from discovery DB')
@@ -121,6 +126,9 @@ export class MessageVerifier {
     const lastNonce = this.verificationDb.getLastSyncedNonce(this.processId)
 
     // Query evaluations table for rows with Messages in output, for this process
+    this.logger.info(`Querying cache DB for rows with nonce > ${lastNonce}...`)
+    const queryStart = Date.now()
+
     const stmt = this.cacheDb.prepare(`
       SELECT
         messageId,
@@ -135,6 +143,8 @@ export class MessageVerifier {
     `)
 
     const rows = stmt.all(this.processId, lastNonce)
+    const queryMs = Date.now() - queryStart
+    this.logger.info(`Cache DB query returned ${rows.length} rows in ${queryMs}ms`)
 
     if (rows.length === 0) {
       this.logger.debug('No new messages to sync from cache DB')
@@ -186,10 +196,245 @@ export class MessageVerifier {
   }
 
   /**
+   * Get nonce range from source DB (cache or discovery)
+   */
+  getSourceNonceRange () {
+    if (this.cacheDb) {
+      // Use separate MIN/MAX queries to leverage index, avoid COUNT(*)
+      this.logger.info('Source range: querying cache DB MIN(nonce)...')
+      let start = Date.now()
+      const minResult = this.cacheDb.prepare(`
+        SELECT MIN(nonce) as minNonce
+        FROM evaluations
+        WHERE processId = ?
+          AND json_array_length(json_extract(output, '$.Messages')) > 0
+      `).get(this.processId)
+      this.logger.info(`Source range: cache DB MIN query took ${Date.now() - start}ms`)
+
+      // If no min, there are no rows
+      if (minResult.minNonce === null) {
+        return { minNonce: null, maxNonce: null, count: 0 }
+      }
+
+      this.logger.info('Source range: querying cache DB MAX(nonce)...')
+      start = Date.now()
+      const maxResult = this.cacheDb.prepare(`
+        SELECT MAX(nonce) as maxNonce
+        FROM evaluations
+        WHERE processId = ?
+          AND json_array_length(json_extract(output, '$.Messages')) > 0
+      `).get(this.processId)
+      this.logger.info(`Source range: cache DB MAX query took ${Date.now() - start}ms`)
+
+      return {
+        minNonce: minResult.minNonce,
+        maxNonce: maxResult.maxNonce,
+        count: -1 // Unknown, but not zero
+      }
+    } else {
+      // Use separate queries for discovery DB too
+      this.logger.info('Source range: querying discovery DB MIN(nonce)...')
+      let start = Date.now()
+      const minResult = this.discoveryDb.query(
+        'SELECT MIN(nonce) as minNonce FROM process_messages'
+      )[0]
+      this.logger.info(`Source range: discovery DB MIN query took ${Date.now() - start}ms`)
+
+      if (minResult.minNonce === null) {
+        return { minNonce: null, maxNonce: null, count: 0 }
+      }
+
+      this.logger.info('Source range: querying discovery DB MAX(nonce)...')
+      start = Date.now()
+      const maxResult = this.discoveryDb.query(
+        'SELECT MAX(nonce) as maxNonce FROM process_messages'
+      )[0]
+      this.logger.info(`Source range: discovery DB MAX query took ${Date.now() - start}ms`)
+
+      return {
+        minNonce: minResult.minNonce,
+        maxNonce: maxResult.maxNonce,
+        count: -1 // Unknown, but not zero
+      }
+    }
+  }
+
+  /**
+   * Check for nonce gaps between source and verification DBs
+   * Returns gap info and whether it's safe to proceed
+   */
+  checkNonceGap () {
+    this.logger.info('Gap check: querying source DB nonce range...')
+    let start = Date.now()
+    const sourceRange = this.getSourceNonceRange()
+    this.logger.info(`Gap check: source DB query took ${Date.now() - start}ms`)
+
+    this.logger.info('Gap check: getting last synced nonce...')
+    start = Date.now()
+    const lastSyncedNonce = this.verificationDb.getLastSyncedNonce(this.processId)
+    this.logger.info(`Gap check: last synced nonce query took ${Date.now() - start}ms`)
+
+    // Get min/max nonce from verification DB (separate queries to use index efficiently)
+    this.logger.info('Gap check: querying verification DB MIN(nonce)...')
+    start = Date.now()
+    const verificationMin = this.verificationDb.query(
+      'SELECT MIN(nonce) as minNonce FROM verification_messages'
+    )[0] || { minNonce: null }
+    this.logger.info(`Gap check: verification MIN query took ${Date.now() - start}ms`)
+
+    this.logger.info('Gap check: querying verification DB MAX(nonce)...')
+    start = Date.now()
+    const verificationMax = this.verificationDb.query(
+      'SELECT MAX(nonce) as maxNonce FROM verification_messages'
+    )[0] || { maxNonce: null }
+    this.logger.info(`Gap check: verification MAX query took ${Date.now() - start}ms`)
+
+    const verificationHasRows = verificationMax.maxNonce !== null
+    const nextNonceNeeded = lastSyncedNonce + 1
+
+    const result = {
+      source: {
+        minNonce: sourceRange.minNonce,
+        maxNonce: sourceRange.maxNonce,
+        count: sourceRange.count
+      },
+      verification: {
+        minNonce: verificationMin.minNonce,
+        maxNonce: verificationMax.maxNonce,
+        nextNonceNeeded
+      },
+      hasGap: false,
+      gapReason: null
+    }
+
+    // Check for gaps
+    if (sourceRange.minNonce === null) {
+      result.hasGap = true
+      result.gapReason = 'Source DB has no messages with output'
+    } else if (!verificationHasRows) {
+      // First sync - no gap issue, source just needs to start from beginning
+      if (sourceRange.minNonce > 0) {
+        // This might be okay if process started at nonce > 0, but warn anyway
+        result.hasGap = false
+      }
+    } else if (nextNonceNeeded < sourceRange.minNonce) {
+      // Verification DB needs nonces that source DB doesn't have (source starts too late)
+      result.hasGap = true
+      result.gapReason = `Verification needs nonce ${nextNonceNeeded} but source DB starts at nonce ${sourceRange.minNonce}`
+    } else if (verificationMin.minNonce !== null && verificationMin.minNonce > sourceRange.maxNonce) {
+      // Verification DB is ahead of source (shouldn't happen normally)
+      result.hasGap = true
+      result.gapReason = `Verification DB min nonce (${verificationMin.minNonce}) is higher than source DB max nonce (${sourceRange.maxNonce})`
+    }
+
+    return result
+  }
+
+  /**
+   * Get rows that would be synced from source DB (without writing)
+   */
+  getRowsToSync () {
+    const lastNonce = this.verificationDb.getLastSyncedNonce(this.processId)
+
+    if (this.cacheDb) {
+      const stmt = this.cacheDb.prepare(`
+        SELECT
+          messageId,
+          nonce,
+          timestamp,
+          json_extract(output, '$.Messages') as messages
+        FROM evaluations
+        WHERE processId = ?
+          AND nonce > ?
+          AND json_array_length(json_extract(output, '$.Messages')) > 0
+        ORDER BY nonce ASC
+      `)
+
+      const rows = stmt.all(this.processId, lastNonce)
+      const verificationRows = []
+
+      for (const row of rows) {
+        const messages = JSON.parse(row.messages)
+        for (let i = 0; i < messages.length; i++) {
+          const msg = messages[i]
+          const tags = msg.Tags || []
+          const referenceTag = tags.find(t => t.name === 'Reference')
+          const actionTag = tags.find(t => t.name === 'Action')
+
+          if (!referenceTag) continue
+
+          verificationRows.push({
+            nonce: row.nonce,
+            input_message_id: row.messageId,
+            output_message_reference: referenceTag.value,
+            output_message_target: msg.Target,
+            output_message_action: actionTag ? actionTag.value : null,
+            output_message_index: i,
+            created_at: row.timestamp
+          })
+        }
+      }
+
+      return verificationRows
+    } else {
+      return this.discoveryDb.query(
+        'SELECT * FROM process_messages WHERE nonce > ? ORDER BY nonce ASC, output_message_index ASC',
+        [lastNonce]
+      )
+    }
+  }
+
+  /**
+   * Run verification without writing to DB (dry run mode)
+   */
+  async runDryRunVerification () {
+    const rowsToSync = this.getRowsToSync()
+
+    let verified = 0
+    let found = 0
+    let notFound = 0
+
+    // Process in batches
+    for (let i = 0; i < rowsToSync.length; i += this.batchSize) {
+      const batch = rowsToSync.slice(i, i + this.batchSize)
+      const foundMessages = await this.findMessagesOnArweave(batch)
+
+      let batchFound = 0
+      let batchNotFound = 0
+
+      for (const row of batch) {
+        const messageId = foundMessages.get(row.output_message_reference)
+        if (messageId) {
+          found++
+          batchFound++
+        } else {
+          notFound++
+          batchNotFound++
+        }
+        verified++
+      }
+
+      this.logger.info(`Dry run batch ${Math.floor(i / this.batchSize) + 1}: verified=${batch.length}, found=${batchFound}, notFound=${batchNotFound}`)
+    }
+
+    return {
+      wouldSync: rowsToSync.length,
+      verified,
+      found,
+      notFound
+    }
+  }
+
+  /**
    * Get pending rows that need verification
    */
   getRowsToVerify () {
-    return this.verificationDb.getRowsToVerify(this.retryAfterMs, this.batchSize)
+    this.logger.info('Querying verification DB for rows to verify...')
+    const queryStart = Date.now()
+    const rows = this.verificationDb.getRowsToVerify(this.retryAfterMs, this.batchSize)
+    const queryMs = Date.now() - queryStart
+    this.logger.info(`Verification DB query returned ${rows.length} rows in ${queryMs}ms`)
+    return rows
   }
 
   /**
@@ -441,6 +686,23 @@ export async function runVerifier ({
   console.log(`Retry after: ${options.retryAfterMinutes || 10} minutes`)
   console.log(`Batch size: ${options.batchSize || 100}`)
   console.log(`Cycle interval: ${intervalMs}ms`)
+
+  // Check for nonce gaps at startup
+  console.log('\nChecking for nonce gaps between source and verification DBs...')
+  const gapCheck = verifier.checkNonceGap()
+
+  console.log(`Source DB: minNonce=${gapCheck.source.minNonce ?? 'N/A'}, maxNonce=${gapCheck.source.maxNonce ?? 'N/A'}`)
+  console.log(`Verification DB: minNonce=${gapCheck.verification.minNonce ?? 'N/A'}, maxNonce=${gapCheck.verification.maxNonce ?? 'N/A'}, nextNonceNeeded=${gapCheck.verification.nextNonceNeeded}`)
+
+  if (gapCheck.hasGap) {
+    console.error('\n⚠️  ERROR: Nonce gap detected!')
+    console.error(`  ${gapCheck.gapReason}`)
+    console.error('\nTerminating. Please ensure source DB has continuous nonce coverage.')
+    verifier.close()
+    process.exit(1)
+  }
+
+  console.log('✓ No nonce gaps detected.\n')
 
   let running = true
 
