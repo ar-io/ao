@@ -19,6 +19,7 @@ export class MessageVerifier {
     cacheDbPath = null, // Optional path to ao-cache.sqlite to use as source
     graphqlUrl = 'https://arweave-search.goldsky.com/graphql',
     retryAfterMinutes = 10,
+    retryLookbackSeconds = null, // Optional: only look at messages from the last N seconds
     batchSize = 100,
     // Known MU owner addresses that publish messages
     muOwners = [
@@ -38,6 +39,7 @@ export class MessageVerifier {
     this.cacheDbPath = cacheDbPath
     this.graphqlUrl = graphqlUrl
     this.retryAfterMs = retryAfterMinutes * 60 * 1000
+    this.retryLookbackMs = retryLookbackSeconds ? retryLookbackSeconds * 1000 : null
     this.batchSize = batchSize
     this.muOwners = muOwners
     this.maxRetries = maxRetries
@@ -433,9 +435,15 @@ export class MessageVerifier {
   getRowsToVerify () {
     this.logger.info('Querying verification DB for rows to verify...')
     const queryStart = Date.now()
-    const rows = this.verificationDb.getRowsToVerify(this.retryAfterMs, this.batchSize)
+    // Calculate minTimestamp if lookback is configured
+    const minTimestamp = this.retryLookbackMs ? Date.now() - this.retryLookbackMs : null
+    const rows = this.verificationDb.getRowsToVerify(this.retryAfterMs, this.batchSize, minTimestamp)
     const queryMs = Date.now() - queryStart
-    this.logger.info(`Verification DB query returned ${rows.length} rows in ${queryMs}ms`)
+    if (minTimestamp) {
+      this.logger.info(`Verification DB query returned ${rows.length} rows in ${queryMs}ms (lookback: messages since ${new Date(minTimestamp).toISOString()})`)
+    } else {
+      this.logger.info(`Verification DB query returned ${rows.length} rows in ${queryMs}ms`)
+    }
     return rows
   }
 
@@ -686,6 +694,9 @@ export async function runVerifier ({
 
   console.log(`Starting verifier for process ${processId}`)
   console.log(`Retry after: ${options.retryAfterMinutes || 10} minutes`)
+  if (options.retryLookbackSeconds) {
+    console.log(`Retry lookback: ${options.retryLookbackSeconds} seconds (only messages from the last ${options.retryLookbackSeconds}s will be retried)`)
+  }
   console.log(`Batch size: ${options.batchSize || 100}`)
   console.log(`Cycle interval: ${intervalMs}ms`)
 

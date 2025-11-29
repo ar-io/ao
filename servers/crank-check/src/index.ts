@@ -67,6 +67,12 @@ const openApiSpec = {
             schema: { type: 'integer' }
           },
           {
+            name: 'cursor',
+            in: 'query',
+            description: 'Pagination cursor (timestamp ms). Use nextCursor from previous response to get next page.',
+            schema: { type: 'integer' }
+          },
+          {
             name: 'limit',
             in: 'query',
             description: 'Maximum number of rows to return (default 100, max 1000)',
@@ -83,6 +89,7 @@ const openApiSpec = {
                   properties: {
                     processId: { type: 'string' },
                     count: { type: 'integer' },
+                    nextCursor: { type: 'integer', nullable: true, description: 'Cursor for next page, null if no more results' },
                     messages: {
                       type: 'array',
                       items: { $ref: '#/components/schemas/VerificationMessage' }
@@ -222,11 +229,12 @@ function getDb(processId: string): Database.Database {
  *   - cranked: "true" or "false" - filter by whether discovered_message_id is set
  *   - after: timestamp (ms) - filter input_message_timestamp > after
  *   - before: timestamp (ms) - filter input_message_timestamp < before
+ *   - cursor: timestamp (ms) - pagination cursor, equivalent to after (use for paging through results)
  *   - limit: max rows to return (default 100, max 1000)
  */
 router.get('/messages/:processId', async (ctx) => {
   const { processId } = ctx.params
-  const { input_message_id, nonce, cranked, after, before, limit } = ctx.query
+  const { input_message_id, nonce, cranked, after, before, cursor, limit } = ctx.query
 
   let db: Database.Database | null = null
 
@@ -255,8 +263,10 @@ router.get('/messages/:processId', async (ctx) => {
       conditions.push('discovered_message_id IS NULL')
     }
 
-    if (after && after !== '') {
-      const afterVal = parseInt(Array.isArray(after) ? after[0] : after, 10)
+    // cursor is an alias for after, used for pagination
+    const afterParam = cursor || after
+    if (afterParam && afterParam !== '') {
+      const afterVal = parseInt(Array.isArray(afterParam) ? afterParam[0] : afterParam, 10)
       if (!isNaN(afterVal)) {
         conditions.push('input_message_timestamp > ?')
         params.push(afterVal)
@@ -286,9 +296,19 @@ router.get('/messages/:processId', async (ctx) => {
 
     const rows = db.prepare(sql).all(...params) as VerificationRow[]
 
+    // Calculate next cursor from the last row's timestamp
+    let nextCursor: number | null = null
+    if (rows.length > 0 && rows.length === rowLimit) {
+      const lastRow = rows[rows.length - 1]
+      if (lastRow.input_message_timestamp !== null) {
+        nextCursor = lastRow.input_message_timestamp
+      }
+    }
+
     ctx.body = {
       processId,
       count: rows.length,
+      nextCursor,
       messages: rows
     }
   } catch (err) {

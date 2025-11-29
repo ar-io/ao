@@ -157,6 +157,18 @@ export function createVerificationDb ({
     LIMIT ?`
   )
 
+  const getRowsToVerifyWithLookbackStmt = db.prepare(
+    `SELECT * FROM ${VERIFICATION_TABLE}
+    WHERE discovered_message_id IS NULL
+      AND (last_discovery_attempt IS NULL OR last_discovery_attempt < ?)
+      AND input_message_timestamp >= ?
+    ORDER BY
+      CASE WHEN last_discovery_attempt IS NULL THEN 0 ELSE 1 END,
+      nonce ASC,
+      output_message_index ASC
+    LIMIT ?`
+  )
+
   const updateDiscoveredStmt = db.prepare(
     `UPDATE ${VERIFICATION_TABLE}
     SET discovered_message_id = ?, last_discovery_attempt = ?
@@ -210,9 +222,13 @@ export function createVerificationDb ({
      * Get rows that need verification
      * @param {number} retryAfterMs - Don't retry rows attempted within this many ms
      * @param {number} limit - Max rows to return
+     * @param {number} minTimestamp - Optional minimum input_message_timestamp (for lookback filtering)
      */
-    getRowsToVerify: (retryAfterMs, limit = 100) => {
+    getRowsToVerify: (retryAfterMs, limit = 100, minTimestamp = null) => {
       const cutoffTime = realDateNow() - retryAfterMs
+      if (minTimestamp !== null) {
+        return getRowsToVerifyWithLookbackStmt.all(cutoffTime, minTimestamp, limit)
+      }
       return getRowsToVerifyStmt.all(cutoffTime, limit)
     },
 

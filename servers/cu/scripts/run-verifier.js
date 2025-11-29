@@ -42,6 +42,7 @@ Options:
   --use-cache <path>         Use ao-cache.sqlite as source instead of discovery DB
   --graphql-url <url>        GraphQL endpoint
   --retry-after <minutes>    Minutes before retrying (default: 10)
+  --retry-lookback <seconds> Only retry messages from the last N seconds (based on input_message_timestamp)
   --batch-size <n>           Messages per cycle (default: 100)
   --interval <ms>            Ms between cycles (default: 60000)
   --once                     Run one cycle and exit
@@ -65,6 +66,7 @@ Examples:
     cacheDbPath: null,
     graphqlUrl: 'https://arweave-search.goldsky.com/graphql',
     retryAfterMinutes: 10,
+    retryLookbackSeconds: null,
     batchSize: 100,
     intervalMs: 60000,
     once: false,
@@ -88,6 +90,9 @@ Examples:
         break
       case '--retry-after':
         options.retryAfterMinutes = parseInt(args[++i], 10)
+        break
+      case '--retry-lookback':
+        options.retryLookbackSeconds = parseInt(args[++i], 10)
         break
       case '--batch-size':
         options.batchSize = parseInt(args[++i], 10)
@@ -148,6 +153,7 @@ async function main () {
       cacheDbPath: options.cacheDbPath,
       graphqlUrl: options.graphqlUrl,
       retryAfterMinutes: options.retryAfterMinutes,
+      retryLookbackSeconds: options.retryLookbackSeconds,
       batchSize: options.batchSize
     })
     verifier.init()
@@ -198,6 +204,7 @@ async function main () {
       cacheDbPath: options.cacheDbPath,
       graphqlUrl: options.graphqlUrl,
       retryAfterMinutes: options.retryAfterMinutes,
+      retryLookbackSeconds: options.retryLookbackSeconds,
       batchSize: options.batchSize
     })
     verifier.init()
@@ -231,6 +238,7 @@ async function main () {
     cacheDbPath: options.cacheDbPath,
     graphqlUrl: options.graphqlUrl,
     retryAfterMinutes: options.retryAfterMinutes,
+    retryLookbackSeconds: options.retryLookbackSeconds,
     batchSize: options.batchSize,
     intervalMs: options.intervalMs
   })
