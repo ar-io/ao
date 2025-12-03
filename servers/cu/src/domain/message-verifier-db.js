@@ -157,11 +157,14 @@ export function createVerificationDb ({
     LIMIT ?`
   )
 
+  // Lookback only applies to retries, not fresh messages
   const getRowsToVerifyWithLookbackStmt = db.prepare(
     `SELECT * FROM ${VERIFICATION_TABLE}
     WHERE discovered_message_id IS NULL
-      AND (last_discovery_attempt IS NULL OR last_discovery_attempt < ?)
-      AND input_message_timestamp >= ?
+      AND (
+        last_discovery_attempt IS NULL
+        OR (last_discovery_attempt < ? AND input_message_timestamp >= ?)
+      )
     ORDER BY
       CASE WHEN last_discovery_attempt IS NULL THEN 0 ELSE 1 END,
       nonce ASC,
