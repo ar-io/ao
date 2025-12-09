@@ -21,6 +21,7 @@ export class MessageVerifier {
     retryAfterMinutes = 10,
     retryLookbackSeconds = null, // Optional: only look at messages from the last N seconds
     batchSize = 100,
+    syncBatchSize = 10000, // Batch size for syncing from source DB
     // Known MU owner addresses that publish messages
     muOwners = [
       'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY',
@@ -41,6 +42,7 @@ export class MessageVerifier {
     this.retryAfterMs = retryAfterMinutes * 60 * 1000
     this.retryLookbackMs = retryLookbackSeconds ? retryLookbackSeconds * 1000 : null
     this.batchSize = batchSize
+    this.syncBatchSize = syncBatchSize
     this.muOwners = muOwners
     this.maxRetries = maxRetries
     this.initialRetryDelayMs = initialRetryDelayMs
@@ -89,47 +91,64 @@ export class MessageVerifier {
   /**
    * Sync from process-messages discovery DB
    * Uses nonce as cursor for incremental sync
+   * Uses batched fetching to avoid OOM on large datasets
    */
   syncFromProcessMessagesDb () {
-    const lastNonce = this.verificationDb.getLastSyncedNonce(this.processId)
+    let currentNonce = this.verificationDb.getLastSyncedNonce(this.processId)
+    let totalSynced = 0
+    let batchNum = 0
 
-    // Query discovery DB for rows with nonce > lastNonce
-    this.logger.info(`Querying discovery DB for rows with nonce > ${lastNonce}...`)
-    const queryStart = Date.now()
+    while (true) {
+      batchNum++
+      this.logger.info(`Sync batch ${batchNum}: querying discovery DB for rows with nonce > ${currentNonce} (limit ${this.syncBatchSize})...`)
+      const queryStart = Date.now()
 
-    const newRows = this.discoveryDb.query(
-      'SELECT * FROM process_messages WHERE nonce > ? ORDER BY nonce ASC, output_message_index ASC',
-      [lastNonce]
-    )
-    const queryMs = Date.now() - queryStart
-    this.logger.info(`Discovery DB query returned ${newRows.length} rows in ${queryMs}ms`)
+      const rows = this.discoveryDb.query(
+        'SELECT * FROM process_messages WHERE nonce > ? ORDER BY nonce ASC, output_message_index ASC LIMIT ?',
+        [currentNonce, this.syncBatchSize]
+      )
+      const queryMs = Date.now() - queryStart
+      this.logger.info(`Sync batch ${batchNum}: discovery DB query returned ${rows.length} rows in ${queryMs}ms`)
 
-    if (newRows.length === 0) {
-      this.logger.debug('No new messages to sync from discovery DB')
-      return 0
+      if (rows.length === 0) {
+        break
+      }
+
+      // Insert into verification DB
+      this.verificationDb.insertMessages(rows)
+      totalSynced += rows.length
+
+      // Update cursor to highest nonce in this batch
+      const maxNonce = rows[rows.length - 1].nonce
+      this.verificationDb.updateCursor(this.processId, maxNonce)
+      currentNonce = maxNonce
+
+      this.logger.info(`Sync batch ${batchNum}: synced ${rows.length} messages (cursor now at nonce ${maxNonce})`)
+
+      // If we got fewer rows than the batch size, we've reached the end
+      if (rows.length < this.syncBatchSize) {
+        break
+      }
     }
 
-    // Insert into verification DB
-    this.verificationDb.insertMessages(newRows)
+    if (totalSynced > 0) {
+      this.logger.info(`Sync complete: ${totalSynced} total messages synced from discovery DB`)
+    } else {
+      this.logger.debug('No new messages to sync from discovery DB')
+    }
 
-    // Update cursor to highest nonce
-    const maxNonce = Math.max(...newRows.map(r => r.nonce))
-    this.verificationDb.updateCursor(this.processId, maxNonce)
-
-    this.logger.info(`Synced ${newRows.length} messages from discovery DB (nonce ${lastNonce} -> ${maxNonce})`)
-    return newRows.length
+    return totalSynced
   }
 
   /**
    * Sync from ao-cache.sqlite evaluations table
    * Extracts output messages from JSONB output field
+   * Uses batched fetching to avoid OOM on large datasets
    */
   syncFromCacheDb () {
-    const lastNonce = this.verificationDb.getLastSyncedNonce(this.processId)
-
-    // Query evaluations table for rows with Messages in output, for this process
-    this.logger.info(`Querying cache DB for rows with nonce > ${lastNonce}...`)
-    const queryStart = Date.now()
+    let currentNonce = this.verificationDb.getLastSyncedNonce(this.processId)
+    let totalSynced = 0
+    let batchNum = 0
 
     const stmt = this.cacheDb.prepare(`
       SELECT
@@ -142,60 +161,77 @@ export class MessageVerifier {
         AND nonce > ?
         AND json_array_length(json_extract(output, '$.Messages')) > 0
       ORDER BY nonce ASC
+      LIMIT ?
     `)
 
-    const rows = stmt.all(this.processId, lastNonce)
-    const queryMs = Date.now() - queryStart
-    this.logger.info(`Cache DB query returned ${rows.length} rows in ${queryMs}ms`)
+    while (true) {
+      batchNum++
+      this.logger.info(`Sync batch ${batchNum}: querying cache DB for rows with nonce > ${currentNonce} (limit ${this.syncBatchSize})...`)
+      const queryStart = Date.now()
 
-    if (rows.length === 0) {
-      this.logger.debug('No new messages to sync from cache DB')
-      return 0
-    }
+      const rows = stmt.all(this.processId, currentNonce, this.syncBatchSize)
+      const queryMs = Date.now() - queryStart
+      this.logger.info(`Sync batch ${batchNum}: cache DB query returned ${rows.length} rows in ${queryMs}ms`)
 
-    // Transform cache rows into verification rows
-    const verificationRows = []
-    for (const row of rows) {
-      const messages = JSON.parse(row.messages)
-      for (let i = 0; i < messages.length; i++) {
-        const msg = messages[i]
-        // Extract Reference and Action from Tags array
-        const tags = msg.Tags || []
-        const referenceTag = tags.find(t => t.name === 'Reference')
-        const actionTag = tags.find(t => t.name === 'Action')
+      if (rows.length === 0) {
+        break
+      }
 
-        if (!referenceTag) {
-          // Skip messages without Reference tag
-          continue
+      // Transform cache rows into verification rows
+      const verificationRows = []
+      for (const row of rows) {
+        const messages = JSON.parse(row.messages)
+        for (let i = 0; i < messages.length; i++) {
+          const msg = messages[i]
+          // Extract Reference and Action from Tags array
+          const tags = msg.Tags || []
+          const referenceTag = tags.find(t => t.name === 'Reference')
+          const actionTag = tags.find(t => t.name === 'Action')
+
+          if (!referenceTag) {
+            // Skip messages without Reference tag
+            continue
+          }
+
+          verificationRows.push({
+            nonce: row.nonce,
+            input_message_id: row.messageId,
+            input_message_timestamp: row.timestamp,
+            output_message_reference: referenceTag.value,
+            output_message_target: msg.Target,
+            output_message_action: actionTag ? actionTag.value : null,
+            output_message_index: i,
+            created_at: row.timestamp
+          })
         }
+      }
 
-        verificationRows.push({
-          nonce: row.nonce,
-          input_message_id: row.messageId,
-          input_message_timestamp: row.timestamp,
-          output_message_reference: referenceTag.value,
-          output_message_target: msg.Target,
-          output_message_action: actionTag ? actionTag.value : null,
-          output_message_index: i,
-          created_at: row.timestamp
-        })
+      if (verificationRows.length > 0) {
+        // Insert into verification DB
+        this.verificationDb.insertMessages(verificationRows)
+        totalSynced += verificationRows.length
+      }
+
+      // Update cursor to highest nonce in this batch
+      const maxNonce = rows[rows.length - 1].nonce
+      this.verificationDb.updateCursor(this.processId, maxNonce)
+      currentNonce = maxNonce
+
+      this.logger.info(`Sync batch ${batchNum}: synced ${verificationRows.length} messages (cursor now at nonce ${maxNonce})`)
+
+      // If we got fewer rows than the batch size, we've reached the end
+      if (rows.length < this.syncBatchSize) {
+        break
       }
     }
 
-    if (verificationRows.length === 0) {
-      this.logger.debug('No messages with Reference tags found in cache DB')
-      return 0
+    if (totalSynced > 0) {
+      this.logger.info(`Sync complete: ${totalSynced} total messages synced from cache DB`)
+    } else {
+      this.logger.debug('No new messages to sync from cache DB')
     }
 
-    // Insert into verification DB
-    this.verificationDb.insertMessages(verificationRows)
-
-    // Update cursor to highest nonce
-    const maxNonce = Math.max(...rows.map(r => r.nonce))
-    this.verificationDb.updateCursor(this.processId, maxNonce)
-
-    this.logger.info(`Synced ${verificationRows.length} messages from cache DB (nonce ${lastNonce} -> ${maxNonce})`)
-    return verificationRows.length
+    return totalSynced
   }
 
   /**
