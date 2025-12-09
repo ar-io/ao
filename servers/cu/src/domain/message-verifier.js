@@ -396,21 +396,29 @@ export class MessageVerifier {
 
     let verified = 0
     let found = 0
+    let corrupted = 0
     let notFound = 0
 
     // Process in batches
     for (let i = 0; i < rowsToSync.length; i += this.batchSize) {
       const batch = rowsToSync.slice(i, i + this.batchSize)
-      const foundMessages = await this.findMessagesOnArweave(batch)
+      const { validMatches, invalidMatches } = await this.findMessagesOnArweave(batch)
 
       let batchFound = 0
+      let batchCorrupted = 0
       let batchNotFound = 0
 
       for (const row of batch) {
-        const messageId = foundMessages.get(row.output_message_reference)
-        if (messageId) {
+        const rowKey = `${row.nonce}:${row.output_message_index}`
+        const validMessageId = validMatches.get(rowKey)
+        const invalidMatch = invalidMatches.get(rowKey)
+
+        if (validMessageId) {
           found++
           batchFound++
+        } else if (invalidMatch) {
+          corrupted++
+          batchCorrupted++
         } else {
           notFound++
           batchNotFound++
@@ -418,13 +426,14 @@ export class MessageVerifier {
         verified++
       }
 
-      this.logger.info(`Dry run batch ${Math.floor(i / this.batchSize) + 1}: verified=${batch.length}, found=${batchFound}, notFound=${batchNotFound}`)
+      this.logger.info(`Dry run batch ${Math.floor(i / this.batchSize) + 1}: verified=${batch.length}, found=${batchFound}, corrupted=${batchCorrupted}, notFound=${batchNotFound}`)
     }
 
     return {
       wouldSync: rowsToSync.length,
       verified,
       found,
+      corrupted,
       notFound
     }
   }
@@ -448,19 +457,20 @@ export class MessageVerifier {
   }
 
   /**
-   * Build GraphQL query for finding messages by multiple Reference tags (batched)
+   * Build GraphQL query for finding messages by multiple Pushed-For tags (input message IDs)
+   * This is the authoritative way to find output messages - by their input message lineage
    */
-  buildBatchQuery (references) {
+  buildPushedForQuery (inputMessageIds) {
     return {
-      query: `query FindMessages($references: [String!]!, $processId: [String!]!, $owners: [String!]!) {
+      query: `query FindMessagesByPushedFor($pushedFor: [String!]!, $processId: [String!]!, $owners: [String!]!) {
         transactions(
           tags: [
-            { name: "Reference", values: $references }
+            { name: "Pushed-For", values: $pushedFor }
             { name: "Data-Protocol", values: ["ao"] }
             { name: "From-Process", values: $processId }
           ],
           owners: $owners,
-          first: ${Math.min(references.length * 2, 100)},
+          first: ${Math.min(inputMessageIds.length * 2, 100)},
           sort: HEIGHT_DESC
         ) {
           edges {
@@ -482,7 +492,7 @@ export class MessageVerifier {
         }
       }`,
       variables: {
-        references,
+        pushedFor: inputMessageIds,
         processId: [this.processId],
         owners: this.muOwners
       }
@@ -511,15 +521,10 @@ export class MessageVerifier {
   }
 
   /**
-   * Query Arweave gateway to find messages by multiple References (batched)
-   * Returns a Map of reference -> messageId (or undefined if not found)
-   * Implements exponential backoff for retries
+   * Execute a GraphQL query with retries
+   * Returns the edges array from the response
    */
-  async findMessagesOnArweave (rows) {
-    // Extract unique references
-    const references = [...new Set(rows.map(r => r.output_message_reference))]
-    const query = this.buildBatchQuery(references)
-
+  async executeGraphQLQuery (query, queryName) {
     let lastError = null
     let delay = this.initialRetryDelayMs
 
@@ -542,7 +547,7 @@ export class MessageVerifier {
             lastError = error
             if (attempt < this.maxRetries) {
               this.logger.warn(
-                `GraphQL batch request failed (attempt ${attempt + 1}/${this.maxRetries + 1}): ${response.status}. Retrying in ${delay}ms...`
+                `GraphQL ${queryName} request failed (attempt ${attempt + 1}/${this.maxRetries + 1}): ${response.status}. Retrying in ${delay}ms...`
               )
               await sleep(delay)
               delay = Math.min(delay * 2, this.maxRetryDelayMs)
@@ -559,33 +564,13 @@ export class MessageVerifier {
           throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`)
         }
 
-        const edges = result.data?.transactions?.edges || []
-
-        // Build a map of reference -> messageId
-        const foundMessages = new Map()
-
-        for (const edge of edges) {
-          const node = edge.node
-          const tags = node.tags || []
-
-          const refTag = tags.find(t => t.name === 'Reference')
-          if (!refTag) continue
-
-          const reference = refTag.value
-
-          // Only set if we haven't found this reference yet (first match wins)
-          if (!foundMessages.has(reference)) {
-            foundMessages.set(reference, node.id)
-          }
-        }
-
-        return foundMessages
+        return result.data?.transactions?.edges || []
       } catch (error) {
         lastError = error
 
         if (this.isRetryableError(error, response) && attempt < this.maxRetries) {
           this.logger.warn(
-            `GraphQL batch request error (attempt ${attempt + 1}/${this.maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`
+            `GraphQL ${queryName} request error (attempt ${attempt + 1}/${this.maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`
           )
           await sleep(delay)
           delay = Math.min(delay * 2, this.maxRetryDelayMs)
@@ -598,9 +583,96 @@ export class MessageVerifier {
     }
 
     // If we get here, we've exhausted retries
-    this.logger.error(`GraphQL batch request failed after ${this.maxRetries + 1} attempts: ${lastError.message}`)
+    this.logger.error(`GraphQL ${queryName} request failed after ${this.maxRetries + 1} attempts: ${lastError.message}`)
     this.logger.error('Max retries exceeded. Terminating process.')
     process.exit(1)
+  }
+
+  /**
+   * Query Arweave gateway to find messages by Pushed-For (input message ID)
+   * Then validate that Reference tag matches what we expect
+   *
+   * Returns an object with:
+   *   - validMatches: Map of (inputId:reference) -> messageId (Pushed-For and Reference both match)
+   *   - invalidMatches: Map of (inputId:reference) -> { messageId, actualReference } (Pushed-For matches but Reference doesn't)
+   */
+  async findMessagesOnArweave (rows) {
+    // Extract unique input message IDs for the query
+    const inputMessageIds = [...new Set(rows.map(r => r.input_message_id))]
+
+    // Query by Pushed-For (the authoritative link to input message)
+    this.logger.info(`Querying by Pushed-For (${inputMessageIds.length} input IDs)...`)
+    const pushedForQuery = this.buildPushedForQuery(inputMessageIds)
+    const edges = await this.executeGraphQLQuery(pushedForQuery, 'Pushed-For')
+
+    // Parse results: group by (pushedFor, action, reference) to match against our rows
+    // Key: "inputId:action:reference" -> { messageId, actualReference }
+    const foundMessages = new Map()
+
+    for (const edge of edges) {
+      const node = edge.node
+      const tags = node.tags || []
+
+      const pushedForTag = tags.find(t => t.name === 'Pushed-For')
+      const refTag = tags.find(t => t.name === 'Reference')
+      const actionTag = tags.find(t => t.name === 'Action')
+
+      if (!pushedForTag) continue
+
+      const inputId = pushedForTag.value
+      const reference = refTag?.value || null
+      const action = actionTag?.value || null
+
+      // Store by inputId + action combo (since multiple outputs per input are distinguished by action)
+      // We'll match against expected reference later
+      const key = `${inputId}:${action || ''}`
+
+      if (!foundMessages.has(key)) {
+        foundMessages.set(key, [])
+      }
+      foundMessages.get(key).push({
+        messageId: node.id,
+        reference,
+        action
+      })
+    }
+
+    // Match found messages against our expected rows
+    const validMatches = new Map()
+    const invalidMatches = new Map()
+
+    for (const row of rows) {
+      const inputId = row.input_message_id
+      const expectedReference = row.output_message_reference
+      const expectedAction = row.output_message_action || ''
+
+      // Lookup key for this row
+      const rowKey = `${row.nonce}:${row.output_message_index}`
+      const lookupKey = `${inputId}:${expectedAction}`
+
+      const candidates = foundMessages.get(lookupKey) || []
+
+      // Find a candidate that matches the expected reference
+      const exactMatch = candidates.find(c => c.reference === expectedReference)
+
+      if (exactMatch) {
+        // Valid match: Pushed-For, Action, and Reference all align
+        validMatches.set(rowKey, exactMatch.messageId)
+      } else if (candidates.length > 0) {
+        // Found message(s) for this input+action, but Reference doesn't match
+        // This is a corrupted message - wrong Reference tag
+        const firstCandidate = candidates[0]
+        invalidMatches.set(rowKey, {
+          messageId: firstCandidate.messageId,
+          actualReference: firstCandidate.reference
+        })
+      }
+      // If no candidates at all, it's just not found (not in either map)
+    }
+
+    this.logger.info(`Found ${validMatches.size} valid matches, ${invalidMatches.size} invalid (corrupted Reference) matches`)
+
+    return { validMatches, invalidMatches }
   }
 
   /**
@@ -619,41 +691,60 @@ export class MessageVerifier {
         synced,
         verified: 0,
         found: 0,
+        corrupted: 0,
         notFound: 0
       }
     }
 
-    // Query for all references in one batch
-    const foundMessages = await this.findMessagesOnArweave(rows)
+    // Query for all input message IDs in one batch
+    const { validMatches, invalidMatches } = await this.findMessagesOnArweave(rows)
 
     let found = 0
+    let corrupted = 0
     let notFound = 0
 
     // Process results and update database
     for (const row of rows) {
-      const messageId = foundMessages.get(row.output_message_reference)
+      const rowKey = `${row.nonce}:${row.output_message_index}`
+      const validMessageId = validMatches.get(rowKey)
+      const invalidMatch = invalidMatches.get(rowKey)
 
-      if (messageId) {
+      if (validMessageId) {
+        // Valid match - Pushed-For, Action, and Reference all align
         this.verificationDb.updateDiscovered(
           row.nonce,
           row.output_message_index,
-          messageId
+          validMessageId
         )
         found++
+      } else if (invalidMatch) {
+        // Invalid match - Pushed-For and Action match, but Reference is wrong
+        this.verificationDb.updateDiscoveredInvalid(
+          row.nonce,
+          row.output_message_index,
+          invalidMatch.messageId
+        )
+        corrupted++
+        this.logger.warn(
+          `Corrupted message detected: nonce=${row.nonce}, ` +
+          `expected reference=${row.output_message_reference}, actual reference=${invalidMatch.actualReference}`
+        )
       } else {
+        // Not found at all
         this.verificationDb.updateAttemptOnly(row.nonce, row.output_message_index)
         notFound++
       }
     }
 
     this.logger.info(
-      `Batch verified ${rows.length} messages: ${found} found, ${notFound} not found`
+      `Batch verified ${rows.length} messages: ${found} found, ${corrupted} corrupted, ${notFound} not found`
     )
 
     return {
       synced,
       verified: rows.length,
       found,
+      corrupted,
       notFound
     }
   }
@@ -739,6 +830,7 @@ export async function runVerifier ({
       // Process all available work in batches
       let totalVerified = 0
       let totalFound = 0
+      let totalCorrupted = 0
       let totalNotFound = 0
       let batchCount = 0
 
@@ -747,16 +839,27 @@ export async function runVerifier ({
         const rows = verifier.getRowsToVerify()
         if (rows.length === 0) break
 
-        const foundMessages = await verifier.findMessagesOnArweave(rows)
+        const { validMatches, invalidMatches } = await verifier.findMessagesOnArweave(rows)
 
         let found = 0
+        let corrupted = 0
         let notFound = 0
 
         for (const row of rows) {
-          const messageId = foundMessages.get(row.output_message_reference)
-          if (messageId) {
-            verifier.verificationDb.updateDiscovered(row.nonce, row.output_message_index, messageId)
+          const rowKey = `${row.nonce}:${row.output_message_index}`
+          const validMessageId = validMatches.get(rowKey)
+          const invalidMatch = invalidMatches.get(rowKey)
+
+          if (validMessageId) {
+            verifier.verificationDb.updateDiscovered(row.nonce, row.output_message_index, validMessageId)
             found++
+          } else if (invalidMatch) {
+            verifier.verificationDb.updateDiscoveredInvalid(row.nonce, row.output_message_index, invalidMatch.messageId)
+            corrupted++
+            console.warn(
+              `Corrupted message: nonce=${row.nonce}, ` +
+              `expected reference=${row.output_message_reference}, actual reference=${invalidMatch.actualReference}`
+            )
           } else {
             verifier.verificationDb.updateAttemptOnly(row.nonce, row.output_message_index)
             notFound++
@@ -765,15 +868,16 @@ export async function runVerifier ({
 
         totalVerified += rows.length
         totalFound += found
+        totalCorrupted += corrupted
         totalNotFound += notFound
         batchCount++
 
-        console.log(`Batch ${batchCount}: verified=${rows.length}, found=${found}, notFound=${notFound}`)
+        console.log(`Batch ${batchCount}: verified=${rows.length}, found=${found}, corrupted=${corrupted}, notFound=${notFound}`)
       }
 
       const dbStats = verifier.getStats()
-      console.log(`Cycle complete: synced=${synced}, totalVerified=${totalVerified}, found=${totalFound}, notFound=${totalNotFound}`)
-      console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
+      console.log(`Cycle complete: synced=${synced}, totalVerified=${totalVerified}, found=${totalFound}, corrupted=${totalCorrupted}, notFound=${totalNotFound}`)
+      console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, corrupted=${dbStats.corrupted}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
 
       // Show when next retries will be eligible
       if (dbStats.needsRetry > 0 && dbStats.earliestRetryAttempt) {

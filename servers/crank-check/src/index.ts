@@ -133,9 +133,11 @@ const openApiSpec = {
                   properties: {
                     processId: { type: 'string' },
                     total: { type: 'integer', description: 'Total messages tracked' },
-                    discovered: { type: 'integer', description: 'Messages found on Arweave' },
-                    pending: { type: 'integer', description: 'Messages not yet found' },
-                    discoveryRate: { type: 'string', description: 'Percentage discovered' },
+                    discovered: { type: 'integer', description: 'Messages found on Arweave (valid)' },
+                    corrupted: { type: 'integer', description: 'Messages found but with wrong Reference tag' },
+                    pending: { type: 'integer', description: 'Messages not yet checked' },
+                    needsRetry: { type: 'integer', description: 'Messages checked but not found, awaiting retry' },
+                    discoveryRate: { type: 'string', description: 'Percentage discovered (valid)' },
                     minNonce: { type: 'integer', nullable: true },
                     maxNonce: { type: 'integer', nullable: true }
                   }
@@ -188,7 +190,8 @@ const openApiSpec = {
           output_message_action: { type: 'string', nullable: true, description: 'Output message action tag' },
           output_message_index: { type: 'integer', description: 'Index of output message within evaluation' },
           created_at: { type: 'integer', description: 'When row was created (ms)' },
-          discovered_message_id: { type: 'string', nullable: true, description: 'Arweave ID if message was found' },
+          discovered_message_id: { type: 'string', nullable: true, description: 'Arweave ID if message was found (valid)' },
+          discovered_invalid_message_id: { type: 'string', nullable: true, description: 'Arweave ID if message was found with wrong Reference tag' },
           last_discovery_attempt: { type: 'integer', nullable: true, description: 'Last verification attempt timestamp (ms)' }
         }
       },
@@ -212,6 +215,7 @@ interface VerificationRow {
   output_message_index: number
   created_at: number
   discovered_message_id: string | null
+  discovered_invalid_message_id: string | null
   last_discovery_attempt: number | null
 }
 
@@ -286,10 +290,16 @@ router.get('/messages/:processId', async (ctx) => {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
 
+    // Order by timestamp if cursor/after is being used for pagination, otherwise by nonce
+    const usesTimestampPagination = !!(cursor || after)
+    const orderClause = usesTimestampPagination
+      ? 'ORDER BY input_message_timestamp ASC, nonce ASC, output_message_index ASC'
+      : 'ORDER BY nonce ASC, output_message_index ASC'
+
     const sql = `
       SELECT * FROM verification_messages
       ${whereClause}
-      ORDER BY nonce ASC, output_message_index ASC
+      ${orderClause}
       LIMIT ?
     `
     params.push(rowLimit)
@@ -340,8 +350,14 @@ router.get('/stats/:processId', async (ctx) => {
     const discovered = db.prepare(
       'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NOT NULL'
     ).get() as { count: number }
+    const corrupted = db.prepare(
+      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_invalid_message_id IS NOT NULL'
+    ).get() as { count: number }
     const pending = db.prepare(
-      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL'
+      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NULL'
+    ).get() as { count: number }
+    const needsRetry = db.prepare(
+      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NOT NULL'
     ).get() as { count: number }
     const maxNonce = db.prepare(
       'SELECT MAX(nonce) as max_nonce FROM verification_messages'
@@ -354,7 +370,9 @@ router.get('/stats/:processId', async (ctx) => {
       processId,
       total: total.count,
       discovered: discovered.count,
+      corrupted: corrupted.count,
       pending: pending.count,
+      needsRetry: needsRetry.count,
       discoveryRate: total.count > 0 ? ((discovered.count / total.count) * 100).toFixed(2) + '%' : '0%',
       minNonce: minNonce.min_nonce,
       maxNonce: maxNonce.max_nonce

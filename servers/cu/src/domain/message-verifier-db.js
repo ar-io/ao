@@ -25,6 +25,7 @@ const createVerificationTable = (db) => db.prepare(
     output_message_index INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     discovered_message_id TEXT,
+    discovered_invalid_message_id TEXT,
     last_discovery_attempt INTEGER,
     PRIMARY KEY (nonce, output_message_index)
   ) WITHOUT ROWID;`
@@ -149,6 +150,7 @@ export function createVerificationDb ({
   const getRowsToVerifyStmt = db.prepare(
     `SELECT * FROM ${VERIFICATION_TABLE}
     WHERE discovered_message_id IS NULL
+      AND discovered_invalid_message_id IS NULL
       AND (last_discovery_attempt IS NULL OR last_discovery_attempt < ?)
     ORDER BY
       CASE WHEN last_discovery_attempt IS NULL THEN 0 ELSE 1 END,
@@ -161,6 +163,7 @@ export function createVerificationDb ({
   const getRowsToVerifyWithLookbackStmt = db.prepare(
     `SELECT * FROM ${VERIFICATION_TABLE}
     WHERE discovered_message_id IS NULL
+      AND discovered_invalid_message_id IS NULL
       AND (
         last_discovery_attempt IS NULL
         OR (last_discovery_attempt < ? AND input_message_timestamp >= ?)
@@ -175,6 +178,12 @@ export function createVerificationDb ({
   const updateDiscoveredStmt = db.prepare(
     `UPDATE ${VERIFICATION_TABLE}
     SET discovered_message_id = ?, last_discovery_attempt = ?
+    WHERE nonce = ? AND output_message_index = ?`
+  )
+
+  const updateDiscoveredInvalidStmt = db.prepare(
+    `UPDATE ${VERIFICATION_TABLE}
+    SET discovered_invalid_message_id = ?, last_discovery_attempt = ?
     WHERE nonce = ? AND output_message_index = ?`
   )
 
@@ -236,10 +245,17 @@ export function createVerificationDb ({
     },
 
     /**
-     * Update a row with discovered message ID
+     * Update a row with discovered message ID (valid match)
      */
     updateDiscovered: (nonce, outputMessageIndex, messageId) => {
       return updateDiscoveredStmt.run(messageId, realDateNow(), nonce, outputMessageIndex)
+    },
+
+    /**
+     * Update a row with discovered invalid message ID (Reference matched but Pushed-For didn't)
+     */
+    updateDiscoveredInvalid: (nonce, outputMessageIndex, messageId) => {
+      return updateDiscoveredInvalidStmt.run(messageId, realDateNow(), nonce, outputMessageIndex)
     },
 
     /**
@@ -257,19 +273,23 @@ export function createVerificationDb ({
       const discovered = db.prepare(
         `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NOT NULL`
       ).get()
+      const corrupted = db.prepare(
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_invalid_message_id IS NOT NULL`
+      ).get()
       const pending = db.prepare(
-        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND last_discovery_attempt IS NULL`
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NULL`
       ).get()
       const needsRetry = db.prepare(
-        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND last_discovery_attempt IS NOT NULL`
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NOT NULL`
       ).get()
       const maxNonce = db.prepare(`SELECT MAX(nonce) as max_nonce FROM ${VERIFICATION_TABLE}`).get()
       const earliestRetry = db.prepare(
-        `SELECT MIN(last_discovery_attempt) as earliest FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND last_discovery_attempt IS NOT NULL`
+        `SELECT MIN(last_discovery_attempt) as earliest FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NOT NULL`
       ).get()
       return {
         total: total.count,
         discovered: discovered.count,
+        corrupted: corrupted.count,
         pending: pending.count,
         needsRetry: needsRetry.count,
         maxNonce: maxNonce.max_nonce || 0,
