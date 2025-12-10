@@ -18,11 +18,6 @@ function tagsContainNumericValues (tags) {
 }
 
 /**
- * SU Router URL for checking if an address is a process
- */
-const SU_ROUTER_URL = 'https://su-router.ao-testnet.xyz'
-
-/**
  * MessageVerifier handles verification of output messages by checking
  * if they have been published to Arweave.
  */
@@ -93,36 +88,30 @@ export class MessageVerifier {
   }
 
   /**
-   * Check if an address is a process by querying the SU router
-   * Caches the result in the address_info table
-   * @param {string} address - The address to check
-   * @returns {Promise<string>} 'p' for process, 'w' for wallet
+   * Build GraphQL query to check if addresses are processes
+   * Processes have a tag with name "Type" and value "Process"
    */
-  async checkAddressType (address) {
-    // Check cache first
-    const cachedType = this.verificationDb.getAddressType(address)
-    if (cachedType) {
-      return cachedType
-    }
-
-    // Query SU router
-    try {
-      const response = await fetch(`${SU_ROUTER_URL}/${address}`)
-      const result = await response.json()
-
-      // If no error, it's a process
-      const type = result.error ? 'w' : 'p'
-      this.verificationDb.setAddressType(address, type)
-      return type
-    } catch (error) {
-      this.logger.warn(`Failed to check address type for ${address}: ${error.message}`)
-      // Default to wallet on error to avoid blocking sync
-      return 'w'
+  buildAddressTypeQuery (ids) {
+    return {
+      query: `query CheckAddressTypes($ids: [ID!]!) {
+        transactions(ids: $ids, first: ${ids.length}) {
+          edges {
+            node {
+              id
+              tags {
+                name
+                value
+              }
+            }
+          }
+        }
+      }`,
+      variables: { ids }
     }
   }
 
   /**
-   * Batch check multiple addresses for their type
+   * Batch check multiple addresses for their type using GraphQL
    * @param {string[]} addresses - Array of addresses to check
    * @returns {Promise<Map<string, string>>} Map of address -> type ('p' or 'w')
    */
@@ -140,21 +129,59 @@ export class MessageVerifier {
       }
     }
 
-    // Query SU for uncached addresses
-    if (uncached.length > 0) {
-      this.logger.info(`Checking ${uncached.length} uncached addresses against SU...`)
+    if (uncached.length === 0) {
+      return results
+    }
+
+    this.logger.info(`Checking ${uncached.length} uncached addresses via GraphQL...`)
+
+    try {
+      const query = this.buildAddressTypeQuery(uncached)
+      const response = await fetch(this.graphqlUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(query)
+      })
+
+      if (!response.ok) {
+        throw new Error(`GraphQL request failed: ${response.status}`)
+      }
+
+      const result = await response.json()
+      if (result.errors) {
+        throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`)
+      }
+
+      const edges = result.data?.transactions?.edges || []
+
+      // Build a set of IDs that were found
+      const foundIds = new Set()
       const newTypes = []
 
+      for (const edge of edges) {
+        const node = edge.node
+        const id = node.id
+        foundIds.add(id)
+
+        // Check if it has Type: Process tag
+        const tags = node.tags || []
+        const typeTag = tags.find(t => t.name === 'Type')
+
+        if (typeTag && typeTag.value === 'Process') {
+          results.set(id, 'p')
+          newTypes.push({ address: id, type: 'p' })
+        } else {
+          // Found on Arweave but no Type: Process tag - warn but treat as process
+          this.logger.warn(`Address ${id} found on Arweave but missing Type:Process tag, treating as process`)
+          results.set(id, 'p')
+          newTypes.push({ address: id, type: 'p' })
+        }
+      }
+
+      // Any uncached addresses not found in results are wallets
       for (const address of uncached) {
-        try {
-          const response = await fetch(`${SU_ROUTER_URL}/${address}`)
-          const result = await response.json()
-          const type = result.error ? 'w' : 'p'
-          results.set(address, type)
-          newTypes.push({ address, type })
-        } catch (error) {
-          this.logger.warn(`Failed to check address type for ${address}: ${error.message}`)
-          results.set(address, 'w') // Default to wallet on error
+        if (!foundIds.has(address)) {
+          results.set(address, 'w')
           newTypes.push({ address, type: 'w' })
         }
       }
@@ -162,6 +189,12 @@ export class MessageVerifier {
       // Batch save to cache
       if (newTypes.length > 0) {
         this.verificationDb.setAddressTypes(newTypes)
+      }
+    } catch (error) {
+      this.logger.error(`Failed to check address types via GraphQL: ${error.message}`)
+      // On error, default all uncached to process to avoid blocking sync
+      for (const address of uncached) {
+        results.set(address, 'p')
       }
     }
 
