@@ -10,6 +10,7 @@ const realDateNow = Date.now.bind(Date)
 
 const VERIFICATION_TABLE = 'verification_messages'
 const CURSOR_TABLE = 'sync_cursors'
+const ADDRESS_INFO_TABLE = 'address_info'
 
 /**
  * Create the verification messages table schema
@@ -28,7 +29,18 @@ const createVerificationTable = (db) => db.prepare(
     discovered_message_id TEXT,
     discovered_invalid_message_id TEXT,
     last_discovery_attempt INTEGER,
+    uncrankable_reason TEXT,
     PRIMARY KEY (nonce, output_message_index)
+  ) WITHOUT ROWID;`
+).run()
+
+/**
+ * Create address info cache table for wallet vs process lookup
+ */
+const createAddressInfoTable = (db) => db.prepare(
+  `CREATE TABLE IF NOT EXISTS ${ADDRESS_INFO_TABLE}(
+    address TEXT PRIMARY KEY,
+    type TEXT NOT NULL CHECK(type IN ('w', 'p'))
   ) WITHOUT ROWID;`
 ).run()
 
@@ -40,6 +52,17 @@ const migrateAddTagsColumn = (db) => {
   const hasTagsColumn = columns.some(col => col.name === 'output_message_tags')
   if (!hasTagsColumn) {
     db.prepare(`ALTER TABLE ${VERIFICATION_TABLE} ADD COLUMN output_message_tags TEXT`).run()
+  }
+}
+
+/**
+ * Migration: Add uncrankable_reason column if it doesn't exist
+ */
+const migrateAddUncrankableReasonColumn = (db) => {
+  const columns = db.prepare(`PRAGMA table_info(${VERIFICATION_TABLE})`).all()
+  const hasColumn = columns.some(col => col.name === 'uncrankable_reason')
+  if (!hasColumn) {
+    db.prepare(`ALTER TABLE ${VERIFICATION_TABLE} ADD COLUMN uncrankable_reason TEXT`).run()
   }
 }
 
@@ -138,6 +161,8 @@ export function createVerificationDb ({
   // Initialize schema
   createVerificationTable(db)
   migrateAddTagsColumn(db)
+  migrateAddUncrankableReasonColumn(db)
+  createAddressInfoTable(db)
   createCursorTable(db)
   createIndexes(db)
 
@@ -147,8 +172,16 @@ export function createVerificationDb ({
   const insertStmt = db.prepare(
     `INSERT OR IGNORE INTO ${VERIFICATION_TABLE}
     (nonce, input_message_id, input_message_timestamp, output_message_reference, output_message_target,
-     output_message_action, output_message_tags, output_message_index, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     output_message_action, output_message_tags, output_message_index, created_at, uncrankable_reason)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+
+  const getAddressInfoStmt = db.prepare(
+    `SELECT type FROM ${ADDRESS_INFO_TABLE} WHERE address = ?`
+  )
+
+  const insertAddressInfoStmt = db.prepare(
+    `INSERT OR IGNORE INTO ${ADDRESS_INFO_TABLE} (address, type) VALUES (?, ?)`
   )
 
   const getCursorStmt = db.prepare(
@@ -164,6 +197,7 @@ export function createVerificationDb ({
     `SELECT * FROM ${VERIFICATION_TABLE}
     WHERE discovered_message_id IS NULL
       AND discovered_invalid_message_id IS NULL
+      AND uncrankable_reason IS NULL
       AND (last_discovery_attempt IS NULL OR last_discovery_attempt < ?)
     ORDER BY
       CASE WHEN last_discovery_attempt IS NULL THEN 0 ELSE 1 END,
@@ -177,6 +211,7 @@ export function createVerificationDb ({
     `SELECT * FROM ${VERIFICATION_TABLE}
     WHERE discovered_message_id IS NULL
       AND discovered_invalid_message_id IS NULL
+      AND uncrankable_reason IS NULL
       AND (
         last_discovery_attempt IS NULL
         OR (last_discovery_attempt < ? AND input_message_timestamp >= ?)
@@ -230,11 +265,42 @@ export function createVerificationDb ({
             msg.output_message_action || null,
             msg.output_message_tags || null,
             msg.output_message_index,
-            msg.created_at
+            msg.created_at,
+            msg.uncrankable_reason || null
           )
         }
       })
       return transaction(messages)
+    },
+
+    /**
+     * Get address type from cache
+     * @returns {string|null} 'w' for wallet, 'p' for process, null if not cached
+     */
+    getAddressType: (address) => {
+      const row = getAddressInfoStmt.get(address)
+      return row ? row.type : null
+    },
+
+    /**
+     * Cache an address type
+     * @param {string} address - The address to cache
+     * @param {string} type - 'w' for wallet, 'p' for process
+     */
+    setAddressType: (address, type) => {
+      return insertAddressInfoStmt.run(address, type)
+    },
+
+    /**
+     * Batch cache multiple address types
+     */
+    setAddressTypes: (addressTypes) => {
+      const transaction = db.transaction((items) => {
+        for (const { address, type } of items) {
+          insertAddressInfoStmt.run(address, type)
+        }
+      })
+      return transaction(addressTypes)
     },
 
     /**
@@ -290,20 +356,28 @@ export function createVerificationDb ({
       const corrupted = db.prepare(
         `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_invalid_message_id IS NOT NULL`
       ).get()
+      const uncrankableWallet = db.prepare(
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE uncrankable_reason = 'wallet'`
+      ).get()
+      const uncrankableTags = db.prepare(
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE uncrankable_reason = 'tags'`
+      ).get()
       const pending = db.prepare(
-        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NULL`
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NULL`
       ).get()
       const needsRetry = db.prepare(
-        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NOT NULL`
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL`
       ).get()
       const maxNonce = db.prepare(`SELECT MAX(nonce) as max_nonce FROM ${VERIFICATION_TABLE}`).get()
       const earliestRetry = db.prepare(
-        `SELECT MIN(last_discovery_attempt) as earliest FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NOT NULL`
+        `SELECT MIN(last_discovery_attempt) as earliest FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL`
       ).get()
       return {
         total: total.count,
         discovered: discovered.count,
         corrupted: corrupted.count,
+        uncrankableWallet: uncrankableWallet.count,
+        uncrankableTags: uncrankableTags.count,
         pending: pending.count,
         needsRetry: needsRetry.count,
         maxNonce: maxNonce.max_nonce || 0,

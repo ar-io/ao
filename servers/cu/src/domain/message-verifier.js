@@ -8,6 +8,21 @@ import { createProcessMessagesDb } from './process-messages-db.js'
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
 /**
+ * Check if a tags array contains any numeric values (not string numbers)
+ * @param {Array} tags - Array of {name, value} objects
+ * @returns {boolean} true if any tag value is a number type
+ */
+function tagsContainNumericValues (tags) {
+  if (!Array.isArray(tags)) return false
+  return tags.some(tag => typeof tag.value === 'number')
+}
+
+/**
+ * SU Router URL for checking if an address is a process
+ */
+const SU_ROUTER_URL = 'https://su-router.ao-testnet.xyz'
+
+/**
  * MessageVerifier handles verification of output messages by checking
  * if they have been published to Arweave.
  */
@@ -78,6 +93,104 @@ export class MessageVerifier {
   }
 
   /**
+   * Check if an address is a process by querying the SU router
+   * Caches the result in the address_info table
+   * @param {string} address - The address to check
+   * @returns {Promise<string>} 'p' for process, 'w' for wallet
+   */
+  async checkAddressType (address) {
+    // Check cache first
+    const cachedType = this.verificationDb.getAddressType(address)
+    if (cachedType) {
+      return cachedType
+    }
+
+    // Query SU router
+    try {
+      const response = await fetch(`${SU_ROUTER_URL}/${address}`)
+      const result = await response.json()
+
+      // If no error, it's a process
+      const type = result.error ? 'w' : 'p'
+      this.verificationDb.setAddressType(address, type)
+      return type
+    } catch (error) {
+      this.logger.warn(`Failed to check address type for ${address}: ${error.message}`)
+      // Default to wallet on error to avoid blocking sync
+      return 'w'
+    }
+  }
+
+  /**
+   * Batch check multiple addresses for their type
+   * @param {string[]} addresses - Array of addresses to check
+   * @returns {Promise<Map<string, string>>} Map of address -> type ('p' or 'w')
+   */
+  async checkAddressTypes (addresses) {
+    const results = new Map()
+    const uncached = []
+
+    // Check cache first
+    for (const address of addresses) {
+      const cachedType = this.verificationDb.getAddressType(address)
+      if (cachedType) {
+        results.set(address, cachedType)
+      } else {
+        uncached.push(address)
+      }
+    }
+
+    // Query SU for uncached addresses
+    if (uncached.length > 0) {
+      this.logger.info(`Checking ${uncached.length} uncached addresses against SU...`)
+      const newTypes = []
+
+      for (const address of uncached) {
+        try {
+          const response = await fetch(`${SU_ROUTER_URL}/${address}`)
+          const result = await response.json()
+          const type = result.error ? 'w' : 'p'
+          results.set(address, type)
+          newTypes.push({ address, type })
+        } catch (error) {
+          this.logger.warn(`Failed to check address type for ${address}: ${error.message}`)
+          results.set(address, 'w') // Default to wallet on error
+          newTypes.push({ address, type: 'w' })
+        }
+      }
+
+      // Batch save to cache
+      if (newTypes.length > 0) {
+        this.verificationDb.setAddressTypes(newTypes)
+      }
+    }
+
+    return results
+  }
+
+  /**
+   * Determine the uncrankable reason for a message, if any
+   * @param {Object} msg - Message object with output_message_target and tags
+   * @param {Map<string, string>} addressTypes - Pre-fetched address types
+   * @returns {string|null} 'wallet', 'tags', or null if crankable
+   */
+  getUncrankableReason (msg, addressTypes) {
+    // Check for numeric tag values first (this is a developer error)
+    const tags = msg.tags || []
+    if (tagsContainNumericValues(tags)) {
+      return 'tags'
+    }
+
+    // Check if target is a wallet
+    const targetType = addressTypes.get(msg.output_message_target)
+    if (targetType === 'w') {
+      return 'wallet'
+    }
+
+    return null
+  }
+
+  /**
    * Sync new messages from source DB to verification DB
    * Routes to appropriate sync method based on configuration
    */
@@ -93,7 +206,7 @@ export class MessageVerifier {
    * Uses nonce as cursor for incremental sync
    * Uses batched fetching to avoid OOM on large datasets
    */
-  syncFromProcessMessagesDb () {
+  async syncFromProcessMessagesDb () {
     let currentNonce = this.verificationDb.getLastSyncedNonce(this.processId)
     let totalSynced = 0
     let batchNum = 0
@@ -112,6 +225,26 @@ export class MessageVerifier {
 
       if (rows.length === 0) {
         break
+      }
+
+      // Collect unique target addresses and check their types
+      const targetAddresses = [...new Set(rows.map(r => r.output_message_target))]
+      const addressTypes = await this.checkAddressTypes(targetAddresses)
+
+      // Set uncrankable_reason for each row
+      for (const row of rows) {
+        // Parse tags from JSON if stored
+        let tags = []
+        if (row.output_message_tags) {
+          try {
+            tags = JSON.parse(row.output_message_tags)
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
+        row.tags = tags
+        row.uncrankable_reason = this.getUncrankableReason(row, addressTypes)
+        delete row.tags
       }
 
       // Insert into verification DB
@@ -145,7 +278,7 @@ export class MessageVerifier {
    * Extracts output messages from JSONB output field
    * Uses batched fetching to avoid OOM on large datasets
    */
-  syncFromCacheDb () {
+  async syncFromCacheDb () {
     let currentNonce = this.verificationDb.getLastSyncedNonce(this.processId)
     let totalSynced = 0
     let batchNum = 0
@@ -177,7 +310,7 @@ export class MessageVerifier {
         break
       }
 
-      // Transform cache rows into verification rows
+      // Transform cache rows into verification rows (first pass - collect data)
       const verificationRows = []
       for (const row of rows) {
         const messages = JSON.parse(row.messages)
@@ -202,12 +335,23 @@ export class MessageVerifier {
             output_message_action: actionTag ? actionTag.value : null,
             output_message_tags: JSON.stringify(tags),
             output_message_index: i,
-            created_at: row.timestamp
+            created_at: row.timestamp,
+            tags // Keep raw tags for uncrankable check
           })
         }
       }
 
       if (verificationRows.length > 0) {
+        // Collect unique target addresses and check their types
+        const targetAddresses = [...new Set(verificationRows.map(r => r.output_message_target))]
+        const addressTypes = await this.checkAddressTypes(targetAddresses)
+
+        // Set uncrankable_reason for each row
+        for (const row of verificationRows) {
+          row.uncrankable_reason = this.getUncrankableReason(row, addressTypes)
+          delete row.tags // Remove raw tags before insert
+        }
+
         // Insert into verification DB
         this.verificationDb.insertMessages(verificationRows)
         totalSynced += verificationRows.length
@@ -987,7 +1131,7 @@ export async function runVerifier ({
 
       const dbStats = verifier.getStats()
       console.log(`Cycle complete: synced=${synced}, totalVerified=${totalVerified}, found=${totalFound}, corrupted=${totalCorrupted}, notFound=${totalNotFound}`)
-      console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, corrupted=${dbStats.corrupted}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
+      console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, corrupted=${dbStats.corrupted}, uncrankableWallet=${dbStats.uncrankableWallet}, uncrankableTags=${dbStats.uncrankableTags}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
 
       // Show when next retries will be eligible
       if (dbStats.needsRetry > 0 && dbStats.earliestRetryAttempt) {

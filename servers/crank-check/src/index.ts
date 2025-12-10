@@ -135,6 +135,8 @@ const openApiSpec = {
                     total: { type: 'integer', description: 'Total messages tracked' },
                     discovered: { type: 'integer', description: 'Messages found on Arweave (valid)' },
                     corrupted: { type: 'integer', description: 'Messages found by Reference but with tag mismatches' },
+                    uncrankableWallet: { type: 'integer', description: 'Messages that will never be cranked because target is a wallet' },
+                    uncrankableTags: { type: 'integer', description: 'Messages that will never be cranked due to numeric tag values' },
                     pending: { type: 'integer', description: 'Messages not yet checked' },
                     needsRetry: { type: 'integer', description: 'Messages checked but not found, awaiting retry' },
                     discoveryRate: { type: 'string', description: 'Percentage discovered (valid)' },
@@ -354,10 +356,16 @@ router.get('/stats/:processId', async (ctx) => {
       'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_invalid_message_id IS NOT NULL'
     ).get() as { count: number }
     const pending = db.prepare(
-      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NULL'
+      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NULL'
     ).get() as { count: number }
     const needsRetry = db.prepare(
-      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND last_discovery_attempt IS NOT NULL'
+      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL'
+    ).get() as { count: number }
+    const uncrankableWallet = db.prepare(
+      "SELECT COUNT(*) as count FROM verification_messages WHERE uncrankable_reason = 'wallet'"
+    ).get() as { count: number }
+    const uncrankableTags = db.prepare(
+      "SELECT COUNT(*) as count FROM verification_messages WHERE uncrankable_reason = 'tags'"
     ).get() as { count: number }
     const maxNonce = db.prepare(
       'SELECT MAX(nonce) as max_nonce FROM verification_messages'
@@ -371,6 +379,8 @@ router.get('/stats/:processId', async (ctx) => {
       total: total.count,
       discovered: discovered.count,
       corrupted: corrupted.count,
+      uncrankableWallet: uncrankableWallet.count,
+      uncrankableTags: uncrankableTags.count,
       pending: pending.count,
       needsRetry: needsRetry.count,
       discoveryRate: total.count > 0 ? ((discovered.count / total.count) * 100).toFixed(2) + '%' : '0%',
