@@ -134,7 +134,7 @@ const openApiSpec = {
                     processId: { type: 'string' },
                     total: { type: 'integer', description: 'Total messages tracked' },
                     discovered: { type: 'integer', description: 'Messages found on Arweave (valid)' },
-                    corrupted: { type: 'integer', description: 'Messages found but with wrong Reference tag' },
+                    corrupted: { type: 'integer', description: 'Messages found by Reference but with tag mismatches' },
                     pending: { type: 'integer', description: 'Messages not yet checked' },
                     needsRetry: { type: 'integer', description: 'Messages checked but not found, awaiting retry' },
                     discoveryRate: { type: 'string', description: 'Percentage discovered (valid)' },
@@ -191,7 +191,7 @@ const openApiSpec = {
           output_message_index: { type: 'integer', description: 'Index of output message within evaluation' },
           created_at: { type: 'integer', description: 'When row was created (ms)' },
           discovered_message_id: { type: 'string', nullable: true, description: 'Arweave ID if message was found (valid)' },
-          discovered_invalid_message_id: { type: 'string', nullable: true, description: 'Arweave ID if message was found with wrong Reference tag' },
+          discovered_invalid_message_id: { type: 'string', nullable: true, description: 'Arweave ID if message was found by Reference but with tag mismatches' },
           last_discovery_attempt: { type: 'integer', nullable: true, description: 'Last verification attempt timestamp (ms)' }
         }
       },

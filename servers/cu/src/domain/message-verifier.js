@@ -200,6 +200,7 @@ export class MessageVerifier {
             output_message_reference: referenceTag.value,
             output_message_target: msg.Target,
             output_message_action: actionTag ? actionTag.value : null,
+            output_message_tags: JSON.stringify(tags),
             output_message_index: i,
             created_at: row.timestamp
           })
@@ -409,6 +410,7 @@ export class MessageVerifier {
             output_message_reference: referenceTag.value,
             output_message_target: msg.Target,
             output_message_action: actionTag ? actionTag.value : null,
+            output_message_tags: JSON.stringify(tags),
             output_message_index: i,
             created_at: row.timestamp
           })
@@ -493,20 +495,19 @@ export class MessageVerifier {
   }
 
   /**
-   * Build GraphQL query for finding messages by multiple Pushed-For tags (input message IDs)
-   * This is the authoritative way to find output messages - by their input message lineage
+   * Build GraphQL query for finding messages by multiple Reference tags
    */
-  buildPushedForQuery (inputMessageIds) {
+  buildReferenceQuery (references) {
     return {
-      query: `query FindMessagesByPushedFor($pushedFor: [String!]!, $processId: [String!]!, $owners: [String!]!) {
+      query: `query FindMessagesByReference($references: [String!]!, $processId: [String!]!, $owners: [String!]!) {
         transactions(
           tags: [
-            { name: "Pushed-For", values: $pushedFor }
+            { name: "Reference", values: $references }
             { name: "Data-Protocol", values: ["ao"] }
             { name: "From-Process", values: $processId }
           ],
           owners: $owners,
-          first: ${Math.min(inputMessageIds.length * 2, 100)},
+          first: ${Math.min(references.length * 2, 100)},
           sort: HEIGHT_DESC
         ) {
           edges {
@@ -528,10 +529,60 @@ export class MessageVerifier {
         }
       }`,
       variables: {
-        pushedFor: inputMessageIds,
+        references,
         processId: [this.processId],
         owners: this.muOwners
       }
+    }
+  }
+
+  /**
+   * Check if all expected tags are present and match in the actual tags
+   * Extra tags in actual are OK, but missing or mismatched tags are not
+   *
+   * @param {Array} expectedTags - Array of {name, value} objects we expect
+   * @param {Array} actualTags - Array of {name, value} objects from GraphQL result
+   * @returns {{ valid: boolean, mismatches: Array }} - Whether valid, and list of mismatched tags
+   */
+  validateTags (expectedTags, actualTags) {
+    const mismatches = []
+
+    // Build a map of actual tags for fast lookup
+    // Note: Some tags may appear multiple times, so we store arrays
+    const actualTagMap = new Map()
+    for (const tag of actualTags) {
+      if (!actualTagMap.has(tag.name)) {
+        actualTagMap.set(tag.name, [])
+      }
+      actualTagMap.get(tag.name).push(tag.value)
+    }
+
+    // Check each expected tag
+    for (const expected of expectedTags) {
+      const actualValues = actualTagMap.get(expected.name)
+
+      if (!actualValues) {
+        // Tag is missing entirely
+        mismatches.push({
+          tag: expected.name,
+          expected: expected.value,
+          actual: null,
+          reason: 'missing'
+        })
+      } else if (!actualValues.includes(expected.value)) {
+        // Tag exists but value doesn't match any of the actual values
+        mismatches.push({
+          tag: expected.name,
+          expected: expected.value,
+          actual: actualValues.length === 1 ? actualValues[0] : actualValues,
+          reason: 'mismatch'
+        })
+      }
+    }
+
+    return {
+      valid: mismatches.length === 0,
+      mismatches
     }
   }
 
@@ -625,88 +676,105 @@ export class MessageVerifier {
   }
 
   /**
-   * Query Arweave gateway to find messages by Pushed-For (input message ID)
-   * Then validate that Reference tag matches what we expect
+   * Query Arweave gateway to find messages by Reference tag
+   * Then validate that ALL expected tags match (extra tags in result are OK)
    *
    * Returns an object with:
-   *   - validMatches: Map of (inputId:reference) -> messageId (Pushed-For and Reference both match)
-   *   - invalidMatches: Map of (inputId:reference) -> { messageId, actualReference } (Pushed-For matches but Reference doesn't)
+   *   - validMatches: Map of rowKey -> messageId (all tags match)
+   *   - invalidMatches: Map of rowKey -> { messageId, mismatches } (Reference matched but other tags didn't)
    */
   async findMessagesOnArweave (rows) {
-    // Extract unique input message IDs for the query
-    const inputMessageIds = [...new Set(rows.map(r => r.input_message_id))]
+    // Extract unique Reference IDs for the query
+    const references = [...new Set(rows.map(r => r.output_message_reference))]
 
-    // Query by Pushed-For (the authoritative link to input message)
-    this.logger.info(`Querying by Pushed-For (${inputMessageIds.length} input IDs)...`)
-    const pushedForQuery = this.buildPushedForQuery(inputMessageIds)
-    const edges = await this.executeGraphQLQuery(pushedForQuery, 'Pushed-For')
+    // Query by Reference
+    this.logger.info(`Querying by Reference (${references.length} refs)...`)
+    const referenceQuery = this.buildReferenceQuery(references)
+    const edges = await this.executeGraphQLQuery(referenceQuery, 'Reference')
 
-    // Parse results: group by (pushedFor, action, reference) to match against our rows
-    // Key: "inputId:action:reference" -> { messageId, actualReference }
-    const foundMessages = new Map()
+    // Group results by Reference tag value
+    // Multiple messages may share the same Reference (shouldn't happen, but handle it)
+    // Sort by block height ascending so we prefer the earliest one
+    const byReference = new Map()
 
     for (const edge of edges) {
       const node = edge.node
       const tags = node.tags || []
 
-      const pushedForTag = tags.find(t => t.name === 'Pushed-For')
       const refTag = tags.find(t => t.name === 'Reference')
-      const actionTag = tags.find(t => t.name === 'Action')
+      if (!refTag) continue
 
-      if (!pushedForTag) continue
+      const reference = refTag.value
+      const blockHeight = node.block?.height ?? Infinity
 
-      const inputId = pushedForTag.value
-      const reference = refTag?.value || null
-      const action = actionTag?.value || null
-
-      // Store by inputId + action combo (since multiple outputs per input are distinguished by action)
-      // We'll match against expected reference later
-      const key = `${inputId}:${action || ''}`
-
-      if (!foundMessages.has(key)) {
-        foundMessages.set(key, [])
+      if (!byReference.has(reference)) {
+        byReference.set(reference, [])
       }
-      foundMessages.get(key).push({
+      byReference.get(reference).push({
         messageId: node.id,
-        reference,
-        action
+        tags,
+        blockHeight
       })
     }
 
-    // Match found messages against our expected rows
+    // Sort each reference's candidates by block height (earliest first)
+    for (const candidates of byReference.values()) {
+      candidates.sort((a, b) => a.blockHeight - b.blockHeight)
+    }
+
+    // Match found messages against our expected rows by validating ALL tags
     const validMatches = new Map()
     const invalidMatches = new Map()
 
     for (const row of rows) {
-      const inputId = row.input_message_id
-      const expectedReference = row.output_message_reference
-      const expectedAction = row.output_message_action || ''
-
-      // Lookup key for this row
       const rowKey = `${row.nonce}:${row.output_message_index}`
-      const lookupKey = `${inputId}:${expectedAction}`
+      const reference = row.output_message_reference
 
-      const candidates = foundMessages.get(lookupKey) || []
-
-      // Find a candidate that matches the expected reference
-      const exactMatch = candidates.find(c => c.reference === expectedReference)
-
-      if (exactMatch) {
-        // Valid match: Pushed-For, Action, and Reference all align
-        validMatches.set(rowKey, exactMatch.messageId)
-      } else if (candidates.length > 0) {
-        // Found message(s) for this input+action, but Reference doesn't match
-        // This is a corrupted message - wrong Reference tag
-        const firstCandidate = candidates[0]
-        invalidMatches.set(rowKey, {
-          messageId: firstCandidate.messageId,
-          actualReference: firstCandidate.reference
-        })
+      // Parse expected tags from the stored JSON
+      let expectedTags = []
+      if (row.output_message_tags) {
+        try {
+          expectedTags = JSON.parse(row.output_message_tags)
+        } catch (e) {
+          this.logger.warn(`Failed to parse tags for row ${rowKey}: ${e.message}`)
+        }
       }
-      // If no candidates at all, it's just not found (not in either map)
+
+      const candidates = byReference.get(reference) || []
+
+      if (candidates.length === 0) {
+        // Not found at all
+        continue
+      }
+
+      // Find a candidate where ALL expected tags match
+      let foundValid = false
+      let bestInvalidMatch = null
+
+      for (const candidate of candidates) {
+        const validation = this.validateTags(expectedTags, candidate.tags)
+
+        if (validation.valid) {
+          // All tags match - this is a valid match
+          validMatches.set(rowKey, candidate.messageId)
+          foundValid = true
+          break
+        } else if (!bestInvalidMatch) {
+          // Keep track of first invalid match for reporting
+          bestInvalidMatch = {
+            messageId: candidate.messageId,
+            mismatches: validation.mismatches
+          }
+        }
+      }
+
+      if (!foundValid && bestInvalidMatch) {
+        // Found message(s) with matching Reference, but other tags didn't match
+        invalidMatches.set(rowKey, bestInvalidMatch)
+      }
     }
 
-    this.logger.info(`Found ${validMatches.size} valid matches, ${invalidMatches.size} invalid (corrupted Reference) matches`)
+    this.logger.info(`Found ${validMatches.size} valid matches, ${invalidMatches.size} invalid (tag mismatch) matches`)
 
     return { validMatches, invalidMatches }
   }
@@ -746,7 +814,7 @@ export class MessageVerifier {
       const invalidMatch = invalidMatches.get(rowKey)
 
       if (validMessageId) {
-        // Valid match - Pushed-For, Action, and Reference all align
+        // Valid match - all tags match
         this.verificationDb.updateDiscovered(
           row.nonce,
           row.output_message_index,
@@ -754,16 +822,19 @@ export class MessageVerifier {
         )
         found++
       } else if (invalidMatch) {
-        // Invalid match - Pushed-For and Action match, but Reference is wrong
+        // Invalid match - Reference matched but other tags didn't
         this.verificationDb.updateDiscoveredInvalid(
           row.nonce,
           row.output_message_index,
           invalidMatch.messageId
         )
         corrupted++
+        const mismatchSummary = invalidMatch.mismatches
+          .map(m => `${m.tag}: expected=${m.expected}, actual=${m.actual}`)
+          .join('; ')
         this.logger.warn(
-          `Corrupted message detected: nonce=${row.nonce}, ` +
-          `expected reference=${row.output_message_reference}, actual reference=${invalidMatch.actualReference}`
+          `Tag mismatch detected: nonce=${row.nonce}, reference=${row.output_message_reference}, ` +
+          `mismatches=[${mismatchSummary}]`
         )
       } else {
         // Not found at all
@@ -892,9 +963,12 @@ export async function runVerifier ({
           } else if (invalidMatch) {
             verifier.verificationDb.updateDiscoveredInvalid(row.nonce, row.output_message_index, invalidMatch.messageId)
             corrupted++
+            const mismatchSummary = invalidMatch.mismatches
+              .map(m => `${m.tag}: expected=${m.expected}, actual=${m.actual}`)
+              .join('; ')
             console.warn(
-              `Corrupted message: nonce=${row.nonce}, ` +
-              `expected reference=${row.output_message_reference}, actual reference=${invalidMatch.actualReference}`
+              `Tag mismatch: nonce=${row.nonce}, reference=${row.output_message_reference}, ` +
+              `mismatches=[${mismatchSummary}]`
             )
           } else {
             verifier.verificationDb.updateAttemptOnly(row.nonce, row.output_message_index)

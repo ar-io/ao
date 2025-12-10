@@ -22,6 +22,7 @@ const createVerificationTable = (db) => db.prepare(
     output_message_reference TEXT NOT NULL,
     output_message_target TEXT NOT NULL,
     output_message_action TEXT,
+    output_message_tags TEXT,
     output_message_index INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     discovered_message_id TEXT,
@@ -30,6 +31,17 @@ const createVerificationTable = (db) => db.prepare(
     PRIMARY KEY (nonce, output_message_index)
   ) WITHOUT ROWID;`
 ).run()
+
+/**
+ * Migration: Add output_message_tags column if it doesn't exist
+ */
+const migrateAddTagsColumn = (db) => {
+  const columns = db.prepare(`PRAGMA table_info(${VERIFICATION_TABLE})`).all()
+  const hasTagsColumn = columns.some(col => col.name === 'output_message_tags')
+  if (!hasTagsColumn) {
+    db.prepare(`ALTER TABLE ${VERIFICATION_TABLE} ADD COLUMN output_message_tags TEXT`).run()
+  }
+}
 
 /**
  * Create cursor tracking table for syncing from discovery DB
@@ -125,6 +137,7 @@ export function createVerificationDb ({
 
   // Initialize schema
   createVerificationTable(db)
+  migrateAddTagsColumn(db)
   createCursorTable(db)
   createIndexes(db)
 
@@ -134,8 +147,8 @@ export function createVerificationDb ({
   const insertStmt = db.prepare(
     `INSERT OR IGNORE INTO ${VERIFICATION_TABLE}
     (nonce, input_message_id, input_message_timestamp, output_message_reference, output_message_target,
-     output_message_action, output_message_index, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+     output_message_action, output_message_tags, output_message_index, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
 
   const getCursorStmt = db.prepare(
@@ -215,6 +228,7 @@ export function createVerificationDb ({
             msg.output_message_reference,
             msg.output_message_target,
             msg.output_message_action || null,
+            msg.output_message_tags || null,
             msg.output_message_index,
             msg.created_at
           )
@@ -252,7 +266,7 @@ export function createVerificationDb ({
     },
 
     /**
-     * Update a row with discovered invalid message ID (Reference matched but Pushed-For didn't)
+     * Update a row with discovered invalid message ID (Reference matched but other tags didn't)
      */
     updateDiscoveredInvalid: (nonce, outputMessageIndex, messageId) => {
       return updateDiscoveredInvalidStmt.run(messageId, realDateNow(), nonce, outputMessageIndex)
