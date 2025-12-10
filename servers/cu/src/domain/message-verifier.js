@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { createVerificationDb } from './message-verifier-db.js'
 import { createProcessMessagesDb } from './process-messages-db.js'
+import { createAddressInfoDb } from './address-info-db.js'
 
 /**
  * Sleep for a given number of milliseconds
@@ -60,6 +61,7 @@ export class MessageVerifier {
     this.logger = logger
 
     this.verificationDb = null
+    this.addressInfoDb = null
     this.discoveryDb = null
     this.cacheDb = null
   }
@@ -70,6 +72,10 @@ export class MessageVerifier {
   init () {
     this.verificationDb = createVerificationDb({
       processId: this.processId,
+      baseDir: this.verificationDbDir
+    })
+
+    this.addressInfoDb = createAddressInfoDb({
       baseDir: this.verificationDbDir
     })
 
@@ -122,7 +128,7 @@ export class MessageVerifier {
 
     // Check cache first
     for (const address of addresses) {
-      const cachedType = this.verificationDb.getAddressType(address)
+      const cachedType = this.addressInfoDb.getAddressType(address)
       if (cachedType) {
         results.set(address, cachedType)
       } else {
@@ -137,12 +143,16 @@ export class MessageVerifier {
     this.logger.info(`Checking ${uncached.length} uncached addresses via GraphQL...`)
 
     const BATCH_SIZE = 100
+    const totalBatches = Math.ceil(uncached.length / BATCH_SIZE)
     const newTypes = []
     const foundIds = new Set()
 
     // Process in batches of 100
     for (let i = 0; i < uncached.length; i += BATCH_SIZE) {
       const batch = uncached.slice(i, i + BATCH_SIZE)
+      const batchNum = Math.floor(i / BATCH_SIZE) + 1
+
+      this.logger.info(`Address type check: batch ${batchNum}/${totalBatches} (${batch.length} addresses)`)
 
       try {
         const query = this.buildAddressTypeQuery(batch)
@@ -183,7 +193,7 @@ export class MessageVerifier {
           }
         }
       } catch (error) {
-        this.logger.error(`Failed to check address types via GraphQL (batch ${Math.floor(i / BATCH_SIZE) + 1}): ${error.message}`)
+        this.logger.error(`Failed to check address types via GraphQL (batch ${batchNum}/${totalBatches}): ${error.message}`)
         // On error, default this batch to process to avoid blocking sync
         for (const address of batch) {
           if (!results.has(address)) {
@@ -203,7 +213,7 @@ export class MessageVerifier {
 
     // Batch save to cache
     if (newTypes.length > 0) {
-      this.verificationDb.setAddressTypes(newTypes)
+      this.addressInfoDb.setAddressTypes(newTypes)
     }
 
     return results
@@ -1054,6 +1064,9 @@ export class MessageVerifier {
   close () {
     if (this.verificationDb) {
       this.verificationDb.close()
+    }
+    if (this.addressInfoDb) {
+      this.addressInfoDb.close()
     }
     if (this.discoveryDb) {
       this.discoveryDb.close()

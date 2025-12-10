@@ -10,7 +10,6 @@ const realDateNow = Date.now.bind(Date)
 
 const VERIFICATION_TABLE = 'verification_messages'
 const CURSOR_TABLE = 'sync_cursors'
-const ADDRESS_INFO_TABLE = 'address_info'
 
 /**
  * Create the verification messages table schema
@@ -31,16 +30,6 @@ const createVerificationTable = (db) => db.prepare(
     last_discovery_attempt INTEGER,
     uncrankable_reason TEXT,
     PRIMARY KEY (nonce, output_message_index)
-  ) WITHOUT ROWID;`
-).run()
-
-/**
- * Create address info cache table for wallet vs process lookup
- */
-const createAddressInfoTable = (db) => db.prepare(
-  `CREATE TABLE IF NOT EXISTS ${ADDRESS_INFO_TABLE}(
-    address TEXT PRIMARY KEY,
-    type TEXT NOT NULL CHECK(type IN ('w', 'p'))
   ) WITHOUT ROWID;`
 ).run()
 
@@ -162,7 +151,6 @@ export function createVerificationDb ({
   createVerificationTable(db)
   migrateAddTagsColumn(db)
   migrateAddUncrankableReasonColumn(db)
-  createAddressInfoTable(db)
   createCursorTable(db)
   createIndexes(db)
 
@@ -174,14 +162,6 @@ export function createVerificationDb ({
     (nonce, input_message_id, input_message_timestamp, output_message_reference, output_message_target,
      output_message_action, output_message_tags, output_message_index, created_at, uncrankable_reason)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-
-  const getAddressInfoStmt = db.prepare(
-    `SELECT type FROM ${ADDRESS_INFO_TABLE} WHERE address = ?`
-  )
-
-  const insertAddressInfoStmt = db.prepare(
-    `INSERT OR IGNORE INTO ${ADDRESS_INFO_TABLE} (address, type) VALUES (?, ?)`
   )
 
   const getCursorStmt = db.prepare(
@@ -271,36 +251,6 @@ export function createVerificationDb ({
         }
       })
       return transaction(messages)
-    },
-
-    /**
-     * Get address type from cache
-     * @returns {string|null} 'w' for wallet, 'p' for process, null if not cached
-     */
-    getAddressType: (address) => {
-      const row = getAddressInfoStmt.get(address)
-      return row ? row.type : null
-    },
-
-    /**
-     * Cache an address type
-     * @param {string} address - The address to cache
-     * @param {string} type - 'w' for wallet, 'p' for process
-     */
-    setAddressType: (address, type) => {
-      return insertAddressInfoStmt.run(address, type)
-    },
-
-    /**
-     * Batch cache multiple address types
-     */
-    setAddressTypes: (addressTypes) => {
-      const transaction = db.transaction((items) => {
-        for (const { address, type } of items) {
-          insertAddressInfoStmt.run(address, type)
-        }
-      })
-      return transaction(addressTypes)
     },
 
     /**
