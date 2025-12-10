@@ -112,6 +112,7 @@ export class MessageVerifier {
 
   /**
    * Batch check multiple addresses for their type using GraphQL
+   * Queries are batched by 100 addresses at a time
    * @param {string[]} addresses - Array of addresses to check
    * @returns {Promise<Map<string, string>>} Map of address -> type ('p' or 'w')
    */
@@ -135,67 +136,74 @@ export class MessageVerifier {
 
     this.logger.info(`Checking ${uncached.length} uncached addresses via GraphQL...`)
 
-    try {
-      const query = this.buildAddressTypeQuery(uncached)
-      const response = await fetch(this.graphqlUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(query)
-      })
+    const BATCH_SIZE = 100
+    const newTypes = []
+    const foundIds = new Set()
 
-      if (!response.ok) {
-        throw new Error(`GraphQL request failed: ${response.status}`)
-      }
+    // Process in batches of 100
+    for (let i = 0; i < uncached.length; i += BATCH_SIZE) {
+      const batch = uncached.slice(i, i + BATCH_SIZE)
 
-      const result = await response.json()
-      if (result.errors) {
-        throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`)
-      }
+      try {
+        const query = this.buildAddressTypeQuery(batch)
+        const response = await fetch(this.graphqlUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(query)
+        })
 
-      const edges = result.data?.transactions?.edges || []
+        if (!response.ok) {
+          throw new Error(`GraphQL request failed: ${response.status}`)
+        }
 
-      // Build a set of IDs that were found
-      const foundIds = new Set()
-      const newTypes = []
+        const result = await response.json()
+        if (result.errors) {
+          throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`)
+        }
 
-      for (const edge of edges) {
-        const node = edge.node
-        const id = node.id
-        foundIds.add(id)
+        const edges = result.data?.transactions?.edges || []
 
-        // Check if it has Type: Process tag
-        const tags = node.tags || []
-        const typeTag = tags.find(t => t.name === 'Type')
+        for (const edge of edges) {
+          const node = edge.node
+          const id = node.id
+          foundIds.add(id)
 
-        if (typeTag && typeTag.value === 'Process') {
-          results.set(id, 'p')
-          newTypes.push({ address: id, type: 'p' })
-        } else {
-          // Found on Arweave but no Type: Process tag - warn but treat as process
-          this.logger.warn(`Address ${id} found on Arweave but missing Type:Process tag, treating as process`)
-          results.set(id, 'p')
-          newTypes.push({ address: id, type: 'p' })
+          // Check if it has Type: Process tag
+          const tags = node.tags || []
+          const typeTag = tags.find(t => t.name === 'Type')
+
+          if (typeTag && typeTag.value === 'Process') {
+            results.set(id, 'p')
+            newTypes.push({ address: id, type: 'p' })
+          } else {
+            // Found on Arweave but no Type: Process tag - warn but treat as process
+            this.logger.warn(`Address ${id} found on Arweave but missing Type:Process tag, treating as process`)
+            results.set(id, 'p')
+            newTypes.push({ address: id, type: 'p' })
+          }
+        }
+      } catch (error) {
+        this.logger.error(`Failed to check address types via GraphQL (batch ${Math.floor(i / BATCH_SIZE) + 1}): ${error.message}`)
+        // On error, default this batch to process to avoid blocking sync
+        for (const address of batch) {
+          if (!results.has(address)) {
+            results.set(address, 'p')
+          }
         }
       }
+    }
 
-      // Any uncached addresses not found in results are wallets
-      for (const address of uncached) {
-        if (!foundIds.has(address)) {
-          results.set(address, 'w')
-          newTypes.push({ address, type: 'w' })
-        }
+    // Any uncached addresses not found in results are wallets
+    for (const address of uncached) {
+      if (!foundIds.has(address) && !results.has(address)) {
+        results.set(address, 'w')
+        newTypes.push({ address, type: 'w' })
       }
+    }
 
-      // Batch save to cache
-      if (newTypes.length > 0) {
-        this.verificationDb.setAddressTypes(newTypes)
-      }
-    } catch (error) {
-      this.logger.error(`Failed to check address types via GraphQL: ${error.message}`)
-      // On error, default all uncached to process to avoid blocking sync
-      for (const address of uncached) {
-        results.set(address, 'p')
-      }
+    // Batch save to cache
+    if (newTypes.length > 0) {
+      this.verificationDb.setAddressTypes(newTypes)
     }
 
     return results
