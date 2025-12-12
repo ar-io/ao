@@ -173,10 +173,10 @@ export function createVerificationDb ({
     VALUES (?, ?, ?)`
   )
 
+  // Include rows with discovered_invalid_message_id for retry - a valid match may be published later
   const getRowsToVerifyStmt = db.prepare(
     `SELECT * FROM ${VERIFICATION_TABLE}
     WHERE discovered_message_id IS NULL
-      AND discovered_invalid_message_id IS NULL
       AND uncrankable_reason IS NULL
       AND (last_discovery_attempt IS NULL OR last_discovery_attempt < ?)
     ORDER BY
@@ -187,10 +187,10 @@ export function createVerificationDb ({
   )
 
   // Lookback only applies to retries, not fresh messages
+  // Include rows with discovered_invalid_message_id for retry
   const getRowsToVerifyWithLookbackStmt = db.prepare(
     `SELECT * FROM ${VERIFICATION_TABLE}
     WHERE discovered_message_id IS NULL
-      AND discovered_invalid_message_id IS NULL
       AND uncrankable_reason IS NULL
       AND (
         last_discovery_attempt IS NULL
@@ -303,8 +303,9 @@ export function createVerificationDb ({
       const discovered = db.prepare(
         `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NOT NULL`
       ).get()
+      // Corrupted = rows where we found an invalid match but NO valid match yet
       const corrupted = db.prepare(
-        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_invalid_message_id IS NOT NULL`
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_invalid_message_id IS NOT NULL AND discovered_message_id IS NULL`
       ).get()
       const uncrankableWallet = db.prepare(
         `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE uncrankable_reason = 'wallet'`
@@ -313,14 +314,15 @@ export function createVerificationDb ({
         `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE uncrankable_reason = 'tags'`
       ).get()
       const pending = db.prepare(
-        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NULL`
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NULL`
       ).get()
+      // needsRetry includes rows with discovered_invalid_message_id since they're now retried
       const needsRetry = db.prepare(
-        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL`
+        `SELECT COUNT(*) as count FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL`
       ).get()
       const maxNonce = db.prepare(`SELECT MAX(nonce) as max_nonce FROM ${VERIFICATION_TABLE}`).get()
       const earliestRetry = db.prepare(
-        `SELECT MIN(last_discovery_attempt) as earliest FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL`
+        `SELECT MIN(last_discovery_attempt) as earliest FROM ${VERIFICATION_TABLE} WHERE discovered_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL`
       ).get()
       return {
         total: total.count,

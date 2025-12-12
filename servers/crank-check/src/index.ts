@@ -352,14 +352,16 @@ router.get('/stats/:processId', async (ctx) => {
     const discovered = db.prepare(
       'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NOT NULL'
     ).get() as { count: number }
+    // Corrupted = rows where we found an invalid match but NO valid match yet
     const corrupted = db.prepare(
-      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_invalid_message_id IS NOT NULL'
+      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_invalid_message_id IS NOT NULL AND discovered_message_id IS NULL'
     ).get() as { count: number }
     const pending = db.prepare(
-      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NULL'
+      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NULL'
     ).get() as { count: number }
+    // needsRetry includes rows with discovered_invalid_message_id since they're now retried
     const needsRetry = db.prepare(
-      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND discovered_invalid_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL'
+      'SELECT COUNT(*) as count FROM verification_messages WHERE discovered_message_id IS NULL AND uncrankable_reason IS NULL AND last_discovery_attempt IS NOT NULL'
     ).get() as { count: number }
     const uncrankableWallet = db.prepare(
       "SELECT COUNT(*) as count FROM verification_messages WHERE uncrankable_reason = 'wallet'"
