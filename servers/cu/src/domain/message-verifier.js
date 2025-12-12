@@ -983,7 +983,7 @@ export class MessageVerifier {
     const synced = await this.syncFromDiscoveryDb()
 
     // Get rows to verify
-    const rows = this.getRowsToVerify()
+    let rows = this.getRowsToVerify()
 
     if (rows.length === 0) {
       return {
@@ -991,7 +991,47 @@ export class MessageVerifier {
         verified: 0,
         found: 0,
         corrupted: 0,
-        notFound: 0
+        notFound: 0,
+        markedUncrankable: 0
+      }
+    }
+
+    // Check for rows that should be marked uncrankable based on current address_info cache
+    // This catches rows that were inserted before the uncrankable feature or before the address was cached
+    let markedUncrankable = 0
+    const rowsWithNullUncrankable = rows.filter(r => r.uncrankable_reason === null)
+    if (rowsWithNullUncrankable.length > 0) {
+      const targetAddresses = [...new Set(rowsWithNullUncrankable.map(r => r.output_message_target))]
+      for (const target of targetAddresses) {
+        const cachedType = this.addressInfoDb.getAddressType(target)
+        if (cachedType === 'w') {
+          // Mark all rows with this target as uncrankable
+          for (const row of rowsWithNullUncrankable) {
+            if (row.output_message_target === target) {
+              this.verificationDb.updateUncrankableReason(row.nonce, row.output_message_index, 'wallet')
+              markedUncrankable++
+            }
+          }
+        }
+      }
+      if (markedUncrankable > 0) {
+        this.logger.info(`Marked ${markedUncrankable} rows as uncrankable (wallet target) based on address_info cache`)
+        // Filter out the newly marked rows
+        rows = rows.filter(r => {
+          const cachedType = this.addressInfoDb.getAddressType(r.output_message_target)
+          return cachedType !== 'w'
+        })
+      }
+    }
+
+    if (rows.length === 0) {
+      return {
+        synced,
+        verified: 0,
+        found: 0,
+        corrupted: 0,
+        notFound: 0,
+        markedUncrankable
       }
     }
 
@@ -1039,7 +1079,8 @@ export class MessageVerifier {
     }
 
     this.logger.info(
-      `Batch verified ${rows.length} messages: ${found} found, ${corrupted} corrupted, ${notFound} not found`
+      `Batch verified ${rows.length} messages: ${found} found, ${corrupted} corrupted, ${notFound} not found` +
+      (markedUncrankable > 0 ? `, ${markedUncrankable} marked uncrankable` : '')
     )
 
     return {
@@ -1047,7 +1088,8 @@ export class MessageVerifier {
       verified: rows.length,
       found,
       corrupted,
-      notFound
+      notFound,
+      markedUncrankable
     }
   }
 
@@ -1137,12 +1179,40 @@ export async function runVerifier ({
       let totalFound = 0
       let totalCorrupted = 0
       let totalNotFound = 0
+      let totalMarkedUncrankable = 0
       let batchCount = 0
 
       // eslint-disable-next-line no-unmodified-loop-condition
       while (running) {
-        const rows = verifier.getRowsToVerify()
+        let rows = verifier.getRowsToVerify()
         if (rows.length === 0) break
+
+        // Check for rows that should be marked uncrankable based on address_info cache
+        const rowsWithNullUncrankable = rows.filter(r => r.uncrankable_reason === null)
+        if (rowsWithNullUncrankable.length > 0) {
+          const targetAddresses = [...new Set(rowsWithNullUncrankable.map(r => r.output_message_target))]
+          let markedUncrankable = 0
+          for (const target of targetAddresses) {
+            const cachedType = verifier.addressInfoDb.getAddressType(target)
+            if (cachedType === 'w') {
+              for (const row of rowsWithNullUncrankable) {
+                if (row.output_message_target === target) {
+                  verifier.verificationDb.updateUncrankableReason(row.nonce, row.output_message_index, 'wallet')
+                  markedUncrankable++
+                }
+              }
+            }
+          }
+          if (markedUncrankable > 0) {
+            console.log(`Marked ${markedUncrankable} rows as uncrankable (wallet target)`)
+            totalMarkedUncrankable += markedUncrankable
+            rows = rows.filter(r => {
+              const cachedType = verifier.addressInfoDb.getAddressType(r.output_message_target)
+              return cachedType !== 'w'
+            })
+            if (rows.length === 0) continue
+          }
+        }
 
         const { validMatches, invalidMatches } = await verifier.findMessagesOnArweave(rows)
 
@@ -1184,7 +1254,8 @@ export async function runVerifier ({
       }
 
       const dbStats = verifier.getStats()
-      console.log(`Cycle complete: synced=${synced}, totalVerified=${totalVerified}, found=${totalFound}, corrupted=${totalCorrupted}, notFound=${totalNotFound}`)
+      console.log(`Cycle complete: synced=${synced}, totalVerified=${totalVerified}, found=${totalFound}, corrupted=${totalCorrupted}, notFound=${totalNotFound}` +
+        (totalMarkedUncrankable > 0 ? `, markedUncrankable=${totalMarkedUncrankable}` : ''))
       console.log(`DB stats: total=${dbStats.total}, discovered=${dbStats.discovered}, corrupted=${dbStats.corrupted}, uncrankableWallet=${dbStats.uncrankableWallet}, uncrankableTags=${dbStats.uncrankableTags}, pending=${dbStats.pending}, needsRetry=${dbStats.needsRetry}, maxNonce=${dbStats.maxNonce}`)
 
       // Show when next retries will be eligible

@@ -221,6 +221,12 @@ export function createVerificationDb ({
     WHERE nonce = ? AND output_message_index = ?`
   )
 
+  const updateUncrankableReasonStmt = db.prepare(
+    `UPDATE ${VERIFICATION_TABLE}
+    SET uncrankable_reason = ?
+    WHERE nonce = ? AND output_message_index = ?`
+  )
+
   const client = {
     /**
      * Get the last synced nonce for a process
@@ -293,6 +299,13 @@ export function createVerificationDb ({
      */
     updateAttemptOnly: (nonce, outputMessageIndex) => {
       return updateAttemptOnlyStmt.run(realDateNow(), nonce, outputMessageIndex)
+    },
+
+    /**
+     * Update uncrankable reason for a row
+     */
+    updateUncrankableReason: (nonce, outputMessageIndex, reason) => {
+      return updateUncrankableReasonStmt.run(reason, nonce, outputMessageIndex)
     },
 
     /**
