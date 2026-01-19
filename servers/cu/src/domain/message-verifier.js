@@ -19,6 +19,17 @@ function tagsContainNumericValues (tags) {
 }
 
 /**
+ * Find the reference tag from a tags array
+ * Supports both old style "Reference" and new style "Ref_" tag names
+ * @param {Array} tags - Array of {name, value} objects
+ * @returns {Object|undefined} The reference tag object, or undefined if not found
+ */
+function findReferenceTag (tags) {
+  if (!Array.isArray(tags)) return undefined
+  return tags.find(t => t.name === 'Reference' || t.name === 'Ref_')
+}
+
+/**
  * MessageVerifier handles verification of output messages by checking
  * if they have been published to Arweave.
  */
@@ -367,13 +378,13 @@ export class MessageVerifier {
         const messages = JSON.parse(row.messages)
         for (let i = 0; i < messages.length; i++) {
           const msg = messages[i]
-          // Extract Reference and Action from Tags array
+          // Extract Reference (or Ref_) and Action from Tags array
           const tags = msg.Tags || []
-          const referenceTag = tags.find(t => t.name === 'Reference')
+          const referenceTag = findReferenceTag(tags)
           const actionTag = tags.find(t => t.name === 'Action')
 
           if (!referenceTag) {
-            // Skip messages without Reference tag
+            // Skip messages without Reference/Ref_ tag
             continue
           }
 
@@ -593,7 +604,7 @@ export class MessageVerifier {
         for (let i = 0; i < messages.length; i++) {
           const msg = messages[i]
           const tags = msg.Tags || []
-          const referenceTag = tags.find(t => t.name === 'Reference')
+          const referenceTag = findReferenceTag(tags)
           const actionTag = tags.find(t => t.name === 'Action')
 
           if (!referenceTag) continue
@@ -690,19 +701,23 @@ export class MessageVerifier {
   }
 
   /**
-   * Build GraphQL query for finding messages by multiple Reference tags
+   * Build GraphQL query for finding messages by reference tag values
+   * @param {string[]} references - Array of reference values to search for
+   * @param {string} tagName - The tag name to search ('Reference' or 'Ref_')
    */
-  buildReferenceQuery (references) {
+  buildReferenceQuery (references, tagName = 'Reference') {
+    // Request up to 5 results per reference to handle duplicates/retries, max 500
+    const resultsLimit = Math.min(references.length * 5, 500)
     return {
       query: `query FindMessagesByReference($references: [String!]!, $processId: [String!]!, $owners: [String!]!) {
         transactions(
           tags: [
-            { name: "Reference", values: $references }
+            { name: "${tagName}", values: $references }
             { name: "Data-Protocol", values: ["ao"] }
             { name: "From-Process", values: $processId }
           ],
           owners: $owners,
-          first: ${Math.min(references.length * 2, 100)},
+          first: ${resultsLimit},
           sort: HEIGHT_DESC
         ) {
           edges {
@@ -871,7 +886,31 @@ export class MessageVerifier {
   }
 
   /**
-   * Query Arweave gateway to find messages by Reference tag
+   * Race multiple GraphQL queries and return first non-empty result.
+   * If the first to complete is empty, waits for remaining and merges.
+   */
+  async raceNonEmptyQueries (queryConfigs) {
+    // Start all queries in parallel
+    const pending = queryConfigs.map(({ query, name }) =>
+      this.executeGraphQLQuery(query, name).then(edges => ({ name, edges }))
+    )
+
+    // Wait for first to complete
+    const first = await Promise.race(pending)
+
+    if (first.edges.length > 0) {
+      this.logger.info(`${first.name} query returned ${first.edges.length} results`)
+      return first.edges
+    }
+
+    // First was empty, wait for all and merge
+    this.logger.info(`${first.name} query returned empty, waiting for remaining queries...`)
+    const all = await Promise.all(pending)
+    return all.flatMap(r => r.edges)
+  }
+
+  /**
+   * Query Arweave gateway to find messages by Reference/Ref_ tag
    * Then validate that ALL expected tags match (extra tags in result are OK)
    *
    * Returns an object with:
@@ -879,24 +918,29 @@ export class MessageVerifier {
    *   - invalidMatches: Map of rowKey -> { messageId, mismatches } (Reference matched but other tags didn't)
    */
   async findMessagesOnArweave (rows) {
-    // Extract unique Reference IDs for the query
+    // Extract unique reference values for the query
     const references = [...new Set(rows.map(r => r.output_message_reference))]
 
-    // Query by Reference
-    this.logger.info(`Querying by Reference (${references.length} refs)...`)
-    const referenceQuery = this.buildReferenceQuery(references)
-    const edges = await this.executeGraphQLQuery(referenceQuery, 'Reference')
+    // Query for both old-style "Reference" and new-style "Ref_" tags
+    // We need two separate queries because GraphQL tags are AND'd together
+    // Race them and take first non-empty result
+    this.logger.info(`Querying by Reference and Ref_ (${references.length} refs)...`)
 
-    // Group results by Reference tag value
-    // Multiple messages may share the same Reference (shouldn't happen, but handle it)
+    const allEdges = await this.raceNonEmptyQueries([
+      { query: this.buildReferenceQuery(references, 'Reference'), name: 'Reference' },
+      { query: this.buildReferenceQuery(references, 'Ref_'), name: 'Ref_' }
+    ])
+
+    // Group results by reference tag value (either Reference or Ref_)
+    // Multiple messages may share the same reference (shouldn't happen, but handle it)
     // Sort by block height ascending so we prefer the earliest one
     const byReference = new Map()
 
-    for (const edge of edges) {
+    for (const edge of allEdges) {
       const node = edge.node
       const tags = node.tags || []
 
-      const refTag = tags.find(t => t.name === 'Reference')
+      const refTag = findReferenceTag(tags)
       if (!refTag) continue
 
       const reference = refTag.value
@@ -964,7 +1008,7 @@ export class MessageVerifier {
       }
 
       if (!foundValid && bestInvalidMatch) {
-        // Found message(s) with matching Reference, but other tags didn't match
+        // Found message(s) with matching reference, but other tags didn't match
         invalidMatches.set(rowKey, bestInvalidMatch)
       }
     }
