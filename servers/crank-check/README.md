@@ -188,202 +188,111 @@ Swagger UI for interactive API documentation.
 
 ## Testing with Testcontainers
 
-For integration tests, we recommend using a testcontainers approach that waits for the CU to be ready before running assertions.
-
-### Wait-for-CU Script
-
-Create a script that waits for the CU to have evaluated a process:
-
-```bash
-#!/bin/bash
-# scripts/wait-for-cu.sh
-
-PROCESS_ID="${1:?Process ID required}"
-CU_URL="${CU_URL:-http://localhost:6363}"
-TIMEOUT="${TIMEOUT:-300}"
-POLL_INTERVAL="${POLL_INTERVAL:-5}"
-
-echo "Waiting for CU to evaluate process: $PROCESS_ID"
-
-start_time=$(date +%s)
-while true; do
-  current_time=$(date +%s)
-  elapsed=$((current_time - start_time))
-  
-  if [ $elapsed -ge $TIMEOUT ]; then
-    echo "Timeout waiting for CU after ${TIMEOUT}s"
-    exit 1
-  fi
-  
-  # Trigger state evaluation and check response
-  response=$(curl -s -w "\n%{http_code}" "$CU_URL/state/$PROCESS_ID" 2>/dev/null)
-  http_code=$(echo "$response" | tail -n1)
-  body=$(echo "$response" | sed '$d')
-  
-  if [ "$http_code" = "200" ]; then
-    # Check if we have ordinate (evaluation progress)
-    ordinate=$(echo "$body" | jq -r '.ordinate // empty' 2>/dev/null)
-    if [ -n "$ordinate" ] && [ "$ordinate" != "null" ]; then
-      echo "CU ready! Process evaluated to ordinate: $ordinate"
-      exit 0
-    fi
-  fi
-  
-  echo "Waiting... (${elapsed}s elapsed, status: $http_code)"
-  sleep $POLL_INTERVAL
-done
-```
-
-### Wait-for-Verification Script
-
-Wait for verification data to be available:
-
-```bash
-#!/bin/bash
-# scripts/wait-for-verification.sh
-
-PROCESS_ID="${1:?Process ID required}"
-CRANK_CHECK_URL="${CRANK_CHECK_URL:-http://localhost:3000}"
-MIN_MESSAGES="${MIN_MESSAGES:-1}"
-TIMEOUT="${TIMEOUT:-180}"
-POLL_INTERVAL="${POLL_INTERVAL:-5}"
-
-echo "Waiting for verification data for process: $PROCESS_ID"
-
-start_time=$(date +%s)
-while true; do
-  current_time=$(date +%s)
-  elapsed=$((current_time - start_time))
-  
-  if [ $elapsed -ge $TIMEOUT ]; then
-    echo "Timeout waiting for verification data after ${TIMEOUT}s"
-    exit 1
-  fi
-  
-  response=$(curl -s "$CRANK_CHECK_URL/stats/$PROCESS_ID" 2>/dev/null)
-  total=$(echo "$response" | jq -r '.total // 0' 2>/dev/null)
-  
-  if [ "$total" -ge "$MIN_MESSAGES" ]; then
-    echo "Verification data ready! Total messages: $total"
-    echo "$response" | jq .
-    exit 0
-  fi
-  
-  echo "Waiting... (${elapsed}s elapsed, total: $total)"
-  sleep $POLL_INTERVAL
-done
-```
-
-### Docker Compose Test Setup
-
-```yaml
-# docker-compose.test.yml
-services:
-  ao-cu-verifier:
-    image: ghcr.io/atticusofsparta/ao-cu-verifier:latest
-    environment:
-      # ... your config
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6363/"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-
-  ao-crank-check:
-    image: ghcr.io/atticusofsparta/ao-crank-check:latest
-    depends_on:
-      ao-cu-verifier:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  test-runner:
-    image: curlimages/curl:latest
-    depends_on:
-      ao-crank-check:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        echo "Triggering state evaluation..."
-        curl -s "http://ao-cu-verifier:6363/state/$PROCESS_ID"
-        
-        echo "Waiting for verification..."
-        sleep 90
-        
-        echo "Checking stats..."
-        curl -s "http://ao-crank-check:3000/stats/$PROCESS_ID" | jq .
-```
-
-### Node.js Testcontainers Example
+Uses the Docker Compose file directly with testcontainers:
 
 ```typescript
-import { GenericContainer, Wait, Network } from 'testcontainers';
+// crank-check.integration.spec.ts
+import { DockerComposeEnvironment, Wait } from 'testcontainers';
+import { resolve } from 'path';
+
+const COMPOSE_DIR = resolve(__dirname, '..');
+const TEST_PROCESS_ID = process.env.TEST_PROCESS_ID!;
+
+interface CrankCheckStats {
+  processId: string;
+  total: number;
+  discovered: number;
+  corrupted: number;
+  uncrankableWallet: number;
+  uncrankableTags: number;
+  pending: number;
+  needsRetry: number;
+  discoveryRate: string;
+  minNonce: number | null;
+  maxNonce: number | null;
+}
+
+/** Poll an endpoint until condition is met */
+async function waitFor<T>(
+  url: string,
+  check: (data: T) => boolean,
+  timeout = 120000,
+  interval = 5000
+): Promise<T> {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json() as T;
+        if (check(data)) return data;
+      }
+    } catch { /* keep polling */ }
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  throw new Error(`Timeout waiting for ${url}`);
+}
 
 describe('Crank Check Integration', () => {
-  let cuContainer: StartedTestContainer;
-  let crankCheckContainer: StartedTestContainer;
-  let network: StartedNetwork;
+  let environment: Awaited<ReturnType<DockerComposeEnvironment['up']>>;
+  let cuUrl: string;
+  let crankCheckUrl: string;
 
   beforeAll(async () => {
-    network = await new Network().start();
-
-    cuContainer = await new GenericContainer('ghcr.io/atticusofsparta/ao-cu-verifier:latest')
-      .withNetwork(network)
-      .withNetworkAliases('cu')
+    environment = await new DockerComposeEnvironment(COMPOSE_DIR, 'docker-compose.example.yml')
       .withEnvironment({
         WALLET: process.env.WALLET!,
-        ALLOW_PROCESSES: process.env.TEST_PROCESS_ID!,
-        VERIFIER_PROCESS_IDS: process.env.TEST_PROCESS_ID!,
+        ALLOW_PROCESSES: TEST_PROCESS_ID,
+        VERIFIER_PROCESS_IDS: TEST_PROCESS_ID,
         VERIFIER_USE_CACHE: '/db/ao-cache.sqlite',
-        MESSAGE_TRACKING_ENABLED: 'true',
       })
-      .withExposedPorts(6363)
-      .withWaitStrategy(Wait.forHttp('/', 6363).forStatusCode(200))
-      .start();
+      .withWaitStrategy('ao-cu-verifier-1', Wait.forHttp('/', 6363))
+      .withWaitStrategy('ao-crank-check-1', Wait.forHttp('/health', 3000))
+      .up();
 
-    crankCheckContainer = await new GenericContainer('ghcr.io/atticusofsparta/ao-crank-check:latest')
-      .withNetwork(network)
-      .withEnvironment({
-        VERIFICATION_DB_DIR: '/data/verification',
-      })
-      .withBindMounts([{
-        source: await cuContainer.exec(['cat', '/data/verification']),
-        target: '/data/verification',
-        mode: 'ro',
-      }])
-      .withExposedPorts(3000)
-      .withWaitStrategy(Wait.forHttp('/health', 3000))
-      .start();
-  }, 120000);
+    const cuContainer = environment.getContainer('ao-cu-verifier-1');
+    const crankContainer = environment.getContainer('ao-crank-check-1');
 
-  it('should return stats after state evaluation', async () => {
-    const cuUrl = `http://${cuContainer.getHost()}:${cuContainer.getMappedPort(6363)}`;
-    const crankUrl = `http://${crankCheckContainer.getHost()}:${crankCheckContainer.getMappedPort(3000)}`;
-    
-    // Trigger state evaluation
-    await fetch(`${cuUrl}/state/${process.env.TEST_PROCESS_ID}`);
-    
-    // Wait for verification cycle
-    await new Promise(resolve => setTimeout(resolve, 90000));
-    
-    // Check stats
-    const response = await fetch(`${crankUrl}/stats/${process.env.TEST_PROCESS_ID}`);
-    const stats = await response.json();
-    
-    expect(stats.total).toBeGreaterThan(0);
+    cuUrl = `http://${cuContainer.getHost()}:${cuContainer.getMappedPort(6363)}`;
+    crankCheckUrl = `http://${crankContainer.getHost()}:${crankContainer.getMappedPort(3000)}`;
   }, 180000);
 
   afterAll(async () => {
-    await crankCheckContainer?.stop();
-    await cuContainer?.stop();
-    await network?.stop();
+    await environment?.down();
   });
+
+  it('should return stats after triggering state evaluation', async () => {
+    // Trigger CU to evaluate the process
+    await fetch(`${cuUrl}/state/${TEST_PROCESS_ID}`);
+
+    // Wait for verification data to be populated
+    const stats = await waitFor<CrankCheckStats>(
+      `${crankCheckUrl}/stats/${TEST_PROCESS_ID}`,
+      (s) => s.total > 0,
+      180000
+    );
+
+    expect(stats.processId).toBe(TEST_PROCESS_ID);
+    expect(stats.total).toBeGreaterThan(0);
+  }, 300000);
 });
+```
+
+**Run with:**
+
+```bash
+TEST_PROCESS_ID=your-process-id WALLET='{"kty":"RSA",...}' npx vitest run
+```
+
+**Required devDependencies:**
+
+```json
+{
+  "devDependencies": {
+    "testcontainers": "^10.0.0",
+    "vitest": "^1.0.0"
+  }
+}
 ```
 
 ## Tuning Guide
