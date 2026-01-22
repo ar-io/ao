@@ -1,0 +1,101 @@
+# Example docker-compose for running CU with verification + crank-check API
+#
+# This setup includes:
+# - ao-cu-verifier: CU with message tracking + verifier enabled
+# - ao-crank-check: Read-only API for querying verification status
+#
+# The two services share a volume for the verification database.
+#
+# Required: Create a .env file or export these variables:
+#   - WALLET or WALLET_FILE: Arweave wallet JSON or path to wallet file
+#   - ALLOW_PROCESSES: Comma-separated list of process IDs to allow
+#   - VERIFIER_PROCESS_IDS: Comma-separated list of process IDs to verify
+
+services:
+  ao-cu-verifier:
+    image: ghcr.io/permaweb/ao-cu-verifier:latest
+    restart: unless-stopped
+    volumes:
+      - ${WALLET_FILE:-./wallet.json}:/usr/app/wallet.json
+      - cu-db:/db
+      - cu-checkpoints:/file-checkpoints
+      # Shared verification data with crank-check
+      - verification-data:/data/verification
+      - process-messages:/data/process-messages
+    ports:
+      - ${CU_PORT:-6363}:6363
+    environment:
+      # CU Core Configuration
+      PORT: 6363
+      WALLET_FILE: /usr/app/wallet.json
+      # Or use inline wallet JSON (not recommended for production):
+      # WALLET: ${WALLET:-}
+
+      # Process filtering - only allow specific processes
+      ALLOW_PROCESSES: ${ALLOW_PROCESSES:-}
+
+      # Database configuration
+      DB_URL: /db/ao-cache
+
+      # Arweave/GraphQL endpoints
+      GATEWAY_URL: ${GATEWAY_URL:-https://arweave.net}
+      GRAPHQL_URL: ${GRAPHQL_URL:-https://arweave-search.goldsky.com/graphql}
+      CHECKPOINT_GRAPHQL_URL: ${CHECKPOINT_GRAPHQL_URL:-https://arweave-search.goldsky.com/graphql}
+      ARWEAVE_URL: ${ARWEAVE_URL:-https://arweave.net}
+
+      # Memory and compute limits
+      PROCESS_WASM_MEMORY_MAX_LIMIT: ${PROCESS_WASM_MEMORY_MAX_LIMIT:-17179869184}
+      PROCESS_WASM_COMPUTE_MAX_LIMIT: ${PROCESS_WASM_COMPUTE_MAX_LIMIT:-9000000000000}
+
+      # Checkpoint configuration
+      PROCESS_CHECKPOINT_TRUSTED_OWNERS: ${PROCESS_CHECKPOINT_TRUSTED_OWNERS:-}
+      DISABLE_PROCESS_FILE_CHECKPOINT_CREATION: ${DISABLE_PROCESS_FILE_CHECKPOINT_CREATION:-false}
+      DISABLE_PROCESS_CHECKPOINT_CREATION: ${DISABLE_PROCESS_CHECKPOINT_CREATION:-false}
+
+      # Other CU settings
+      NODE_CONFIG_ENV: ${NODE_CONFIG_ENV:-development}
+      NODE_HEAPDUMP_OPTIONS: ${NODE_HEAPDUMP_OPTIONS:-nosignal}
+
+      # Message Tracking (enabled by default in this image)
+      MESSAGE_TRACKING_ENABLED: "true"
+      MESSAGE_TRACKING_DB_DIR: /data/process-messages
+      VERIFICATION_DB_DIR: /data/verification
+
+      # Verifier Configuration
+      # Comma-separated list of process IDs to verify
+      VERIFIER_PROCESS_IDS: ${VERIFIER_PROCESS_IDS:-}
+      VERIFIER_INTERVAL_MS: ${VERIFIER_INTERVAL_MS:-60000}
+      VERIFIER_BATCH_SIZE: ${VERIFIER_BATCH_SIZE:-100}
+      VERIFIER_RETRY_AFTER_MINUTES: ${VERIFIER_RETRY_AFTER_MINUTES:-10}
+      # Use ao-cache.sqlite for historical evaluations (recommended)
+      # This syncs all past messages from the CU's cache, not just new ones
+      VERIFIER_USE_CACHE: ${VERIFIER_USE_CACHE:-/db/ao-cache.sqlite}
+      # Timing configuration
+      VERIFIER_STARTUP_DELAY: ${VERIFIER_STARTUP_DELAY:-30}
+      VERIFIER_RESTART_DELAY: ${VERIFIER_RESTART_DELAY:-60}
+
+  ao-crank-check:
+    image: ghcr.io/permaweb/ao-crank-check:latest
+    restart: unless-stopped
+    ports:
+      - ${CRANK_CHECK_PORT:-3000}:3000
+    environment:
+      PORT: 3000
+      VERIFICATION_DB_DIR: /data/verification
+    volumes:
+      # Mount verification data as read-only
+      - verification-data:/data/verification:ro
+    depends_on:
+      - ao-cu-verifier
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  cu-db:
+  cu-checkpoints:
+  verification-data:
+  process-messages:

@@ -1,0 +1,65 @@
+name: 🔍 Test & Deploy Crank Check Service
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "servers/crank-check/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "servers/crank-check/**"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Checkout repo
+        uses: actions/checkout@v4
+
+      - name: ⎔ Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 📥 Download deps
+        working-directory: servers/crank-check
+        run: npm ci
+
+      - name: 🔨 Build
+        working-directory: servers/crank-check
+        run: npm run build
+
+  publish:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [test]
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    steps:
+      - name: ⬇️ Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Crank Check image
+        uses: docker/build-push-action@v4
+        with:
+          push: true
+          context: servers/crank-check
+          tags: |
+            ghcr.io/permaweb/ao-crank-check:latest
+            ghcr.io/permaweb/ao-crank-check:${{ github.sha }}
