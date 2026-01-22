@@ -1,0 +1,73 @@
+name: 🔍 Test & Deploy AO CU Verifier
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "servers/cu/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "servers/cu/**"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Checkout repo
+        uses: actions/checkout@v4
+
+      - name: ⎔ Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 📥 Download repo deps
+        run: npm i
+
+      - name: 📥 Download deps
+        working-directory: servers/cu
+        run: npm i
+
+      - name: ⚡ Run Tests
+        working-directory: servers/cu
+        run: |
+          npm run lint
+          npm test
+        env:
+          CI: true
+
+  publish:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [test]
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    steps:
+      - name: ⬇️ Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push CU Verifier image
+        uses: docker/build-push-action@v4
+        with:
+          push: true
+          context: servers/cu
+          file: servers/cu/Dockerfile.verifier
+          tags: |
+            ghcr.io/permaweb/ao-cu-verifier:latest
+            ghcr.io/permaweb/ao-cu-verifier:${{ github.sha }}

@@ -1,0 +1,58 @@
+# Testing with published images from ghcr.io/atticusofsparta
+
+services:
+  ao-cu-verifier:
+    image: ghcr.io/atticusofsparta/ao-cu-verifier:latest
+    restart: unless-stopped
+    volumes:
+      - cu-db:/db
+      - cu-checkpoints:/file-checkpoints
+      - verification-data:/data/verification
+      - process-messages:/data/process-messages
+    ports:
+      - ${CU_PORT:-6363}:6363
+    environment:
+      PORT: 6363
+      WALLET: ${WALLET:-}
+      ALLOW_PROCESSES: ${ALLOW_PROCESSES:-}
+      DB_URL: /db/ao-cache
+      GATEWAY_URL: ${GATEWAY_URL:-https://arweave.net}
+      GRAPHQL_URL: ${GRAPHQL_URL:-https://arweave-search.goldsky.com/graphql}
+      CHECKPOINT_GRAPHQL_URL: ${CHECKPOINT_GRAPHQL_URL:-https://arweave-search.goldsky.com/graphql}
+      ARWEAVE_URL: ${ARWEAVE_URL:-https://arweave.net}
+      PROCESS_WASM_MEMORY_MAX_LIMIT: ${PROCESS_WASM_MEMORY_MAX_LIMIT:-17179869184}
+      PROCESS_WASM_COMPUTE_MAX_LIMIT: ${PROCESS_WASM_COMPUTE_MAX_LIMIT:-9000000000000}
+      PROCESS_CHECKPOINT_TRUSTED_OWNERS: ${PROCESS_CHECKPOINT_TRUSTED_OWNERS:-}
+      DISABLE_PROCESS_FILE_CHECKPOINT_CREATION: ${DISABLE_PROCESS_FILE_CHECKPOINT_CREATION:-false}
+      DISABLE_PROCESS_CHECKPOINT_CREATION: ${DISABLE_PROCESS_CHECKPOINT_CREATION:-false}
+      NODE_CONFIG_ENV: ${NODE_CONFIG_ENV:-development}
+      NODE_HEAPDUMP_OPTIONS: ${NODE_HEAPDUMP_OPTIONS:-nosignal}
+      MESSAGE_TRACKING_ENABLED: "true"
+      MESSAGE_TRACKING_DB_DIR: /data/process-messages
+      VERIFICATION_DB_DIR: /data/verification
+      VERIFIER_PROCESS_IDS: ${VERIFIER_PROCESS_IDS:-}
+      VERIFIER_INTERVAL_MS: ${VERIFIER_INTERVAL_MS:-60000}
+      VERIFIER_BATCH_SIZE: ${VERIFIER_BATCH_SIZE:-100}
+      VERIFIER_RETRY_AFTER_MINUTES: ${VERIFIER_RETRY_AFTER_MINUTES:-10}
+      VERIFIER_USE_CACHE: ${VERIFIER_USE_CACHE:-}
+      VERIFIER_STARTUP_DELAY: ${VERIFIER_STARTUP_DELAY:-30}
+      VERIFIER_RESTART_DELAY: ${VERIFIER_RESTART_DELAY:-60}
+
+  ao-crank-check:
+    image: ghcr.io/atticusofsparta/ao-crank-check:latest
+    restart: unless-stopped
+    ports:
+      - ${CRANK_CHECK_PORT:-3000}:3000
+    environment:
+      PORT: 3000
+      VERIFICATION_DB_DIR: /data/verification
+    volumes:
+      - verification-data:/data/verification
+    depends_on:
+      - ao-cu-verifier
+
+volumes:
+  cu-db:
+  cu-checkpoints:
+  verification-data:
+  process-messages:
