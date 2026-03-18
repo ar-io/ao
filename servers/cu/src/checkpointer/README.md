@@ -59,34 +59,34 @@ allows, the CU will skip the duplicate upload.
 
 ## Usage
 
-Start the sidecar alongside the CU using the `checkpointing` profile:
+**Important:** Always use `-d` (detached mode) when starting the sidecar.
+Running `docker compose up` without `-d` attaches to **all** services in
+the project. If you then hit Ctrl+C, it will stop the CU server too, not
+just the sidecar.
+
+Start the sidecar alongside an already-running CU:
 
 ```sh
-docker compose --profile checkpointing up -d
+DRY_RUN=true docker compose --profile checkpointing up -d checkpointer
 ```
 
-This does not restart or disrupt the already-running CU server.
+This does not restart or disrupt the CU server. Dry-run mode is the
+default -- the sidecar runs the full loop (reads nonces, queries GraphQL,
+evaluates the threshold) but logs what it *would* do instead of sending
+SIGUSR2 or writing to its database.
 
-To start in dry-run mode (the default):
-
-```sh
-DRY_RUN=true docker compose --profile checkpointing up -d
-```
-
-In dry-run mode the sidecar runs the full loop -- reads nonces, queries
-GraphQL, evaluates the threshold -- but logs what it *would* do instead of
-sending SIGUSR2 or writing to its database.
-
-To enable live checkpointing:
-
-```sh
-DRY_RUN=false docker compose --profile checkpointing up -d
-```
-
-View logs:
+View the sidecar's logs:
 
 ```sh
 docker compose logs -f checkpointer
+```
+
+Ctrl+C here only exits the log viewer, not the containers.
+
+Enable live checkpointing:
+
+```sh
+DRY_RUN=false docker compose --profile checkpointing up -d checkpointer
 ```
 
 Stop only the sidecar:
