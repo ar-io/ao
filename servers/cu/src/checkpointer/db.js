@@ -25,13 +25,30 @@ export function createDb (dbPath) {
       return stmt.run(processId, nonce, bundlerUrl)
     },
 
-    getLatestCheckpoint (processId) {
+    getLatestConfirmedCheckpoint (processId) {
       return db.prepare(`
         SELECT * FROM checkpoints
-        WHERE process_id = ?
+        WHERE process_id = ? AND data_item_id IS NOT NULL
         ORDER BY last_known_nonce DESC
         LIMIT 1
       `).get(processId)
+    },
+
+    hasPendingCheckpoint (processId) {
+      return !!db.prepare(`
+        SELECT 1 FROM checkpoints
+        WHERE process_id = ? AND data_item_id IS NULL
+          AND time_requested > datetime('now', '-1 hour')
+        LIMIT 1
+      `).get(processId)
+    },
+
+    expireStalePendingCheckpoints (processId) {
+      return db.prepare(`
+        DELETE FROM checkpoints
+        WHERE process_id = ? AND data_item_id IS NULL
+          AND time_requested <= datetime('now', '-1 hour')
+      `).run(processId)
     },
 
     getPendingCheckpoints () {

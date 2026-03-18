@@ -90,6 +90,12 @@ async function pollPendingCheckpoints (db) {
 }
 
 async function checkAndMaybeCheckpoint (db) {
+  // Expire pending checkpoints older than 1 hour (upload likely failed)
+  const expired = db.expireStalePendingCheckpoints(PROCESS_ID)
+  if (expired.changes > 0) {
+    log(`Expired ${expired.changes} stale pending checkpoint(s)`)
+  }
+
   // Step 1: Get latest evaluation from the CU's ao-cache.sqlite
   const latest = readLatestEvaluationFromCu(PROCESS_ID)
   if (!latest) {
@@ -101,12 +107,18 @@ async function checkAndMaybeCheckpoint (db) {
   const age = Date.now() - evaluatedAt
   log(`Latest nonce for process: ${latestNonce} (evaluatedAt: ${new Date(evaluatedAt).toISOString()}, age: ${Math.round(age / 1000)}s)`)
 
-  // Step 2: Determine the nonce of the last checkpoint (from our DB or GQL)
+  // Step 2: If we already have a pending (unconfirmed) checkpoint, don't trigger another
+  if (db.hasPendingCheckpoint(PROCESS_ID)) {
+    log('A checkpoint request is already pending confirmation. Skipping.')
+    return
+  }
+
+  // Step 3: Determine the nonce of the last confirmed checkpoint (from our DB or GQL)
   let lastCheckpointNonce = 0
-  const dbCheckpoint = db.getLatestCheckpoint(PROCESS_ID)
+  const dbCheckpoint = db.getLatestConfirmedCheckpoint(PROCESS_ID)
   if (dbCheckpoint) {
     lastCheckpointNonce = dbCheckpoint.last_known_nonce
-    log(`Last checkpoint nonce (from local DB): ${lastCheckpointNonce}`)
+    log(`Last confirmed checkpoint nonce (from local DB): ${lastCheckpointNonce}`)
   } else {
     // No local record; check GQL for existing checkpoints
     try {
@@ -122,7 +134,7 @@ async function checkAndMaybeCheckpoint (db) {
     }
   }
 
-  // Step 3: Check if threshold is met
+  // Step 4: Check if threshold is met
   const noncesSinceCheckpoint = latestNonce - lastCheckpointNonce
   log(`Nonces since last checkpoint: ${noncesSinceCheckpoint} (threshold: ${NONCE_THRESHOLD})`)
 
@@ -131,7 +143,7 @@ async function checkAndMaybeCheckpoint (db) {
     return
   }
 
-  // Step 4: Send SIGUSR2 and record the checkpoint request
+  // Step 5: Send SIGUSR2 and record the checkpoint request
   if (DRY_RUN) {
     log(`[DRY RUN] Would trigger checkpoint at nonce ${latestNonce} (SIGUSR2 not sent, DB not updated)`)
     return
