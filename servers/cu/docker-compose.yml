@@ -19,3 +19,24 @@ services:
       timeout: 59s
       retries: 0
       start_period: 60s
+
+  checkpointer:
+    build: ./src/checkpointer
+    restart: always
+    pid: "service:server"
+    depends_on:
+      server:
+        condition: service_healthy
+    volumes:
+      - ./checkpointer-data:/data
+      - ./db:/usr/app/db:ro
+    environment:
+      - PROCESS_ID=${PROCESS_ID:-qNvAoz0TgcH7DMg8BCVn8jF32QH5L6T29VjHxhHqqGE}
+      - NONCE_THRESHOLD=${NONCE_THRESHOLD:-1000}
+      - GRAPHQL_URL=${GRAPHQL_URL:-https://arweave-search.goldsky.com/graphql}
+      - DB_PATH=/data/checkpoints.sqlite
+      - BUNDLER_URL=${BUNDLER_URL:-https://upload.ardrive.io}
+      - POLL_INTERVAL_MS=${POLL_INTERVAL_MS:-60000}
+      - DRY_RUN=${DRY_RUN:-true}
+    profiles:
+      - checkpointing
