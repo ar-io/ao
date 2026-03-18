@@ -40,14 +40,6 @@ function readLatestEvaluationFromCu (processId) {
   }
 }
 
-/**
- * Check if the CU is actively evaluating by looking at whether new
- * evaluations have been written recently. If the most recent evaluatedAt
- * is older than STALE_THRESHOLD_MS, the CU is likely still catching up
- * from a checkpoint and hasn't reached this nonce in the current run.
- */
-const STALE_THRESHOLD_MS = parseInt(process.env.STALE_THRESHOLD_MS || String(10 * 60 * 1000), 10) // 10 minutes
-
 function sendCheckpointSignal () {
   try {
     const pid = execSync('pgrep -f "^node.*app.js"', { encoding: 'utf-8' }).trim()
@@ -108,11 +100,6 @@ async function checkAndMaybeCheckpoint (db) {
   const { nonce: latestNonce, evaluatedAt } = latest
   const age = Date.now() - evaluatedAt
   log(`Latest nonce for process: ${latestNonce} (evaluatedAt: ${new Date(evaluatedAt).toISOString()}, age: ${Math.round(age / 1000)}s)`)
-
-  if (age > STALE_THRESHOLD_MS) {
-    log(`Latest evaluation is stale (>${Math.round(STALE_THRESHOLD_MS / 1000)}s old). CU may be catching up. Skipping.`)
-    return
-  }
 
   // Step 2: Determine the nonce of the last checkpoint (from our DB or GQL)
   let lastCheckpointNonce = 0
