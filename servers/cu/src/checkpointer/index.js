@@ -138,7 +138,7 @@ async function checkAndMaybeCheckpoint (db, owners) {
   }
 
   // Step 3: Determine the nonce of the last confirmed checkpoint (from our DB or GQL)
-  let lastCheckpointNonce = 0
+  let lastCheckpointNonce = null
   const dbCheckpoint = db.getLatestConfirmedCheckpoint(PROCESS_ID)
   if (dbCheckpoint) {
     lastCheckpointNonce = dbCheckpoint.last_known_nonce
@@ -151,10 +151,13 @@ async function checkAndMaybeCheckpoint (db, owners) {
         lastCheckpointNonce = gqlCheckpoint.nonce
         log(`Last checkpoint nonce (from GQL): ${lastCheckpointNonce} txId=${gqlCheckpoint.dataItemId} owner=${gqlCheckpoint.owner}`)
       } else {
-        log('No existing checkpoints found. Starting from nonce 0.')
+        log('No existing checkpoints found on GQL. Assuming nonce 0.')
+        lastCheckpointNonce = 0
       }
     } catch (err) {
       log('Error fetching latest checkpoint from GQL:', err.message)
+      log('Cannot determine last checkpoint nonce. Skipping cycle.')
+      return
     }
   }
 
