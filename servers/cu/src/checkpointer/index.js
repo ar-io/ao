@@ -49,19 +49,25 @@ function readLatestEvaluationFromCu (processId) {
  * and combine with any additional trusted owners from config.
  */
 async function getTrustedOwners () {
+  let cuAddress = null
   try {
     const res = await fetch(CU_URL)
     if (!res.ok) throw new Error(`CU healthcheck returned ${res.status}`)
     const { address } = await res.json()
     if (!address) throw new Error('No address in CU healthcheck response')
-    const owners = new Set([address, ...CHECKPOINT_TRUSTED_OWNERS])
-    return [...owners]
+    cuAddress = address
+    log(`CU wallet address: ${cuAddress}`)
   } catch (err) {
     log('Error fetching CU wallet address:', err.message)
-    // Fall back to just the configured trusted owners if any
-    if (CHECKPOINT_TRUSTED_OWNERS.length > 0) return CHECKPOINT_TRUSTED_OWNERS
-    return null
   }
+
+  const owners = new Set([
+    ...(cuAddress ? [cuAddress] : []),
+    ...CHECKPOINT_TRUSTED_OWNERS
+  ])
+
+  if (owners.size === 0) return null
+  return [...owners]
 }
 
 function sendCheckpointSignal () {
@@ -85,10 +91,12 @@ async function pollPendingCheckpoints (db, owners) {
   const pending = db.getPendingCheckpoints()
   if (pending.length === 0) return false
 
-  log(`Found ${pending.length} checkpoint(s) awaiting index info`)
+  log(`Found ${pending.length} checkpoint(s) awaiting index info. Searching owners: [${owners.join(', ')}]`)
 
   for (const cp of pending) {
     try {
+      log(`Polling for checkpoint: process=${cp.process_id} nonce=${cp.last_known_nonce} requested=${cp.time_requested}`)
+
       // First try exact nonce match
       let result = await findCheckpointAtNonce(GRAPHQL_URL, cp.process_id, cp.last_known_nonce, owners)
 
@@ -100,10 +108,10 @@ async function pollPendingCheckpoints (db, owners) {
       }
 
       if (result) {
-        log(`Checkpoint indexed: process=${cp.process_id} nonce=${cp.last_known_nonce} txId=${result.dataItemId} blockHeight=${result.blockHeight} owner=${result.owner || 'unknown'}`)
+        log(`Checkpoint indexed: process=${cp.process_id} nonce=${result.nonce} txId=${result.dataItemId} blockHeight=${result.blockHeight} owner=${result.owner || 'unknown'}`)
         db.updateCheckpointIndexInfo(cp.id, result.dataItemId, result.blockHeight)
       } else {
-        log(`Checkpoint not yet indexed: process=${cp.process_id} nonce=${cp.last_known_nonce}`)
+        log(`Checkpoint not yet indexed: process=${cp.process_id} nonce=${cp.last_known_nonce} (searching owners: [${owners.join(', ')}])`)
       }
     } catch (err) {
       log(`Error polling checkpoint index info for id=${cp.id}:`, err.message)
