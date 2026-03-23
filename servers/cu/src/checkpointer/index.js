@@ -12,6 +12,10 @@ const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '60000', 10)
 const INDEX_POLL_MAX_ATTEMPTS = 5 // 5 attempts * 1 minute = 5 minutes
 const AO_CACHE_DB_PATH = process.env.AO_CACHE_DB_PATH || '/usr/app/db/ao-cache.sqlite'
 const DRY_RUN = process.env.DRY_RUN === 'true'
+const CU_URL = process.env.CU_URL || 'http://localhost:6363'
+const CHECKPOINT_TRUSTED_OWNERS = process.env.CHECKPOINT_TRUSTED_OWNERS
+  ? process.env.CHECKPOINT_TRUSTED_OWNERS.split(',').map(s => s.trim()).filter(Boolean)
+  : []
 
 function log (...args) {
   console.log(`[${new Date().toISOString()}]`, ...args)
@@ -40,6 +44,26 @@ function readLatestEvaluationFromCu (processId) {
   }
 }
 
+/**
+ * Fetch the CU's wallet address from its healthcheck endpoint
+ * and combine with any additional trusted owners from config.
+ */
+async function getTrustedOwners () {
+  try {
+    const res = await fetch(CU_URL)
+    if (!res.ok) throw new Error(`CU healthcheck returned ${res.status}`)
+    const { address } = await res.json()
+    if (!address) throw new Error('No address in CU healthcheck response')
+    const owners = new Set([address, ...CHECKPOINT_TRUSTED_OWNERS])
+    return [...owners]
+  } catch (err) {
+    log('Error fetching CU wallet address:', err.message)
+    // Fall back to just the configured trusted owners if any
+    if (CHECKPOINT_TRUSTED_OWNERS.length > 0) return CHECKPOINT_TRUSTED_OWNERS
+    return null
+  }
+}
+
 function sendCheckpointSignal () {
   try {
     const pid = execSync('pgrep -f "^node.*app.js"', { encoding: 'utf-8' }).trim()
@@ -57,7 +81,7 @@ function sendCheckpointSignal () {
  * Poll GQL for index info on pending checkpoints.
  * Returns true if there are still pending checkpoints that need more polling.
  */
-async function pollPendingCheckpoints (db) {
+async function pollPendingCheckpoints (db, owners) {
   const pending = db.getPendingCheckpoints()
   if (pending.length === 0) return false
 
@@ -66,17 +90,17 @@ async function pollPendingCheckpoints (db) {
   for (const cp of pending) {
     try {
       // First try exact nonce match
-      let result = await findCheckpointAtNonce(GRAPHQL_URL, cp.process_id, cp.last_known_nonce)
+      let result = await findCheckpointAtNonce(GRAPHQL_URL, cp.process_id, cp.last_known_nonce, owners)
 
       // If no exact match, check if a checkpoint with higher nonce exists
       // (the CU may have checkpointed at a slightly different nonce than we recorded)
       if (!result) {
-        result = await findCheckpointAfterNonce(GRAPHQL_URL, cp.process_id, cp.last_known_nonce - 100)
+        result = await findCheckpointAfterNonce(GRAPHQL_URL, cp.process_id, cp.last_known_nonce - 100, owners)
         if (result && result.nonce < cp.last_known_nonce) result = null
       }
 
       if (result) {
-        log(`Checkpoint indexed: process=${cp.process_id} nonce=${cp.last_known_nonce} dataItemId=${result.dataItemId} blockHeight=${result.blockHeight}`)
+        log(`Checkpoint indexed: process=${cp.process_id} nonce=${cp.last_known_nonce} txId=${result.dataItemId} blockHeight=${result.blockHeight} owner=${result.owner || 'unknown'}`)
         db.updateCheckpointIndexInfo(cp.id, result.dataItemId, result.blockHeight)
       } else {
         log(`Checkpoint not yet indexed: process=${cp.process_id} nonce=${cp.last_known_nonce}`)
@@ -89,7 +113,7 @@ async function pollPendingCheckpoints (db) {
   return db.getPendingCheckpoints().length > 0
 }
 
-async function checkAndMaybeCheckpoint (db) {
+async function checkAndMaybeCheckpoint (db, owners) {
   // Expire pending checkpoints older than 1 hour (upload likely failed)
   const expired = db.expireStalePendingCheckpoints(PROCESS_ID)
   if (expired.changes > 0) {
@@ -118,14 +142,14 @@ async function checkAndMaybeCheckpoint (db) {
   const dbCheckpoint = db.getLatestConfirmedCheckpoint(PROCESS_ID)
   if (dbCheckpoint) {
     lastCheckpointNonce = dbCheckpoint.last_known_nonce
-    log(`Last confirmed checkpoint nonce (from local DB): ${lastCheckpointNonce}`)
+    log(`Last confirmed checkpoint nonce (from local DB): ${lastCheckpointNonce} txId=${dbCheckpoint.data_item_id}`)
   } else {
     // No local record; check GQL for existing checkpoints
     try {
-      const gqlCheckpoint = await getLatestCheckpoint(GRAPHQL_URL, PROCESS_ID)
+      const gqlCheckpoint = await getLatestCheckpoint(GRAPHQL_URL, PROCESS_ID, owners)
       if (gqlCheckpoint) {
         lastCheckpointNonce = gqlCheckpoint.nonce
-        log(`Last checkpoint nonce (from GQL): ${lastCheckpointNonce}`)
+        log(`Last checkpoint nonce (from GQL): ${lastCheckpointNonce} txId=${gqlCheckpoint.dataItemId} owner=${gqlCheckpoint.owner}`)
       } else {
         log('No existing checkpoints found. Starting from nonce 0.')
       }
@@ -165,6 +189,8 @@ async function mainLoop () {
   log(`Bundler URL: ${BUNDLER_URL}`)
   log(`Poll interval: ${POLL_INTERVAL_MS}ms`)
   log(`AO cache DB: ${AO_CACHE_DB_PATH}`)
+  log(`CU URL: ${CU_URL}`)
+  if (CHECKPOINT_TRUSTED_OWNERS.length > 0) log(`Additional trusted owners: [${CHECKPOINT_TRUSTED_OWNERS.join(', ')}]`)
   if (DRY_RUN) log('DRY RUN MODE: will not send signals or write to checkpoint DB')
 
   const db = createDb(DB_PATH)
@@ -183,19 +209,28 @@ async function mainLoop () {
 
   while (true) {
     try {
+      // Resolve trusted owners (CU wallet + configured owners)
+      const owners = await getTrustedOwners()
+      if (!owners) {
+        log('Could not determine trusted owners. Skipping cycle.')
+        await sleep(POLL_INTERVAL_MS)
+        continue
+      }
+      log(`Trusted checkpoint owners: [${owners.join(', ')}]`)
+
       // Phase 1: Poll for index info on pending checkpoints
       // Keep polling once per minute for up to 5 minutes
-      let hasPending = await pollPendingCheckpoints(db)
+      let hasPending = await pollPendingCheckpoints(db, owners)
       let pollAttempts = 0
       while (hasPending && pollAttempts < INDEX_POLL_MAX_ATTEMPTS - 1) {
         pollAttempts++
         log(`Pending checkpoints still unresolved. Polling again (${pollAttempts}/${INDEX_POLL_MAX_ATTEMPTS - 1})...`)
         await sleep(POLL_INTERVAL_MS)
-        hasPending = await pollPendingCheckpoints(db)
+        hasPending = await pollPendingCheckpoints(db, owners)
       }
 
       // Phase 2: Check if it's time to checkpoint
-      await checkAndMaybeCheckpoint(db)
+      await checkAndMaybeCheckpoint(db, owners)
     } catch (err) {
       log('Unexpected error in main loop:', err.message)
     }
